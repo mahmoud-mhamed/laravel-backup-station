@@ -307,6 +307,7 @@ return [
         'psql' => env('BACKUP_STATION_PSQL'),
         'sqlite3' => env('BACKUP_STATION_SQLITE3'),
         'gzip' => env('BACKUP_STATION_GZIP'),
+        'zip' => env('BACKUP_STATION_ZIP'),
     ],
 
     /*
@@ -427,6 +428,13 @@ return [
             '/bin/gzip',
             '/usr/local/bin/gzip',
             '/opt/homebrew/bin/gzip',
+        ],
+        'zip' => [
+            '/usr/bin/zip',
+            '/bin/zip',
+            '/usr/local/bin/zip',
+            '/opt/homebrew/bin/zip',
+            'C:\\Program Files\\7-Zip\\7z.exe',
         ],
     ],
 

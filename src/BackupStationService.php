@@ -1539,11 +1539,59 @@ class BackupStationService
     /**
      * Wrap a file in a plain (unencrypted) ZIP. Used when archive='zip'.
      *
-     * Uses addFile() + an explicit deflate compression method so the
-     * archive is readable by the broadest set of tools — including
-     * macOS Archive Utility, which rejects non-standard compression.
+     * Tries the system `zip` CLI first — its archives are universally
+     * accepted (including by macOS Archive Utility, which sometimes
+     * rejects PHP/libzip-generated archives as "unsupported format").
+     * Falls back to PHP's ZipArchive when the binary isn't available.
      */
     protected function plainZip(string $source, string $zipPath, string $innerName): void
+    {
+        try {
+            $bin = $this->resolveBinary('zip');
+            $this->plainZipViaCli($bin, $source, $zipPath, $innerName);
+            $this->verifyZip($zipPath);
+            return;
+        } catch (Throwable $e) {
+            // CLI not available or failed — fall back to ZipArchive.
+        }
+
+        $this->plainZipViaPhp($source, $zipPath, $innerName);
+        $this->verifyZip($zipPath);
+    }
+
+    protected function plainZipViaCli(string $bin, string $source, string $zipPath, string $innerName): void
+    {
+        // Stage the source so the entry name matches `$innerName` exactly:
+        // `zip` records the path as given on the command line, so we copy
+        // it next to the archive as the desired inner name.
+        $stageDir = dirname($zipPath);
+        $stagedFile = $stageDir . '/' . $innerName;
+
+        $cleanup = function () use ($stagedFile) {
+            if (is_file($stagedFile)) @unlink($stagedFile);
+        };
+
+        if ($source !== $stagedFile) {
+            if (!@copy($source, $stagedFile)) {
+                throw new RuntimeException('Failed to stage file for system zip.');
+            }
+        }
+
+        try {
+            $process = new Process([$bin, '-q', '-j', '-9', $zipPath, $stagedFile], $stageDir);
+            $process->setTimeout((int) config('backup-station.timeout', 1800));
+            $process->run();
+
+            if (!$process->isSuccessful()) {
+                @unlink($zipPath);
+                throw new RuntimeException('System zip failed: ' . trim($process->getErrorOutput() ?: $process->getOutput()));
+            }
+        } finally {
+            $cleanup();
+        }
+    }
+
+    protected function plainZipViaPhp(string $source, string $zipPath, string $innerName): void
     {
         if (!class_exists(\ZipArchive::class)) {
             throw new RuntimeException('PHP zip extension is required for ZIP archives.');
@@ -1561,9 +1609,6 @@ class BackupStationService
             throw new RuntimeException('Failed to add file to archive.');
         }
 
-        // Pin the compression method to standard deflate (8). Some libzip
-        // builds default to deflate64 or other variants that macOS Archive
-        // Utility refuses with "unsupported format".
         if (defined('ZipArchive::CM_DEFLATE')) {
             @$zip->setCompressionName($innerName, \ZipArchive::CM_DEFLATE);
         }
@@ -1572,8 +1617,6 @@ class BackupStationService
             @unlink($zipPath);
             throw new RuntimeException('Failed to write archive.');
         }
-
-        $this->verifyZip($zipPath);
     }
 
     /**

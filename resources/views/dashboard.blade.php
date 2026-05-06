@@ -142,11 +142,18 @@
                             </form>
                         </td>
                         <td>
-                            <div class="filename">{{ $b['filename'] ?? '—' }}</div>
+                            @php $isRestore = ($b['type'] ?? null) === 'restore'; @endphp
+                            <div class="filename">
+                                @if($isRestore)<span class="badge badge-info" style="margin-right:6px">↺ Restore</span>@endif
+                                {{ $b['filename'] ?? '—' }}
+                            </div>
                             @if(!empty($b['note']))<div class="muted">{{ $b['note'] }}</div>@endif
                             @if(!empty($b['monthly_keep']))<span class="badge badge-info" style="margin-top:4px">Monthly</span>@endif
-                            @if(!empty($b['filename']) && str_ends_with(strtolower($b['filename']), '.zip'))
+                            @if(!$isRestore && !empty($b['filename']) && str_ends_with(strtolower($b['filename']), '.zip'))
                                 <span class="badge badge-warning" style="margin-top:4px" title="AES-256 password protected">🔒 Encrypted</span>
+                            @endif
+                            @if($isRestore && !empty($b['restored_by']['user_name']))
+                                <div class="muted" style="font-size:11px;margin-top:3px">by {{ $b['restored_by']['user_name'] }}</div>
                             @endif
                         </td>
                         <td>
@@ -198,7 +205,11 @@
                         <td>
                             <div class="row-actions">
                                 @php $exists = $b['_exists'] ?? true; @endphp
-                                @if(($b['status'] ?? null) === 'success' && $exists)
+                                @if($isRestore)
+                                    @if(!empty($b['error']))
+                                        <button type="button" class="btn btn-sm btn-danger js-view-error" data-error="{{ $b['error'] }}">View error</button>
+                                    @endif
+                                @elseif(($b['status'] ?? null) === 'success' && $exists)
                                     @if(config('backup-station.download_password'))
                                         <form method="POST" action="{{ route('backup-station.download', $id) }}" style="display:inline" id="dl-form-{{ $id }}">
                                             @csrf

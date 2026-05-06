@@ -103,6 +103,11 @@ class BackupStationController extends Controller
         }
 
         foreach ($items as &$item) {
+            // Restore-type rows reference a source backup; skip the disk check.
+            if (($item['type'] ?? null) === 'restore') {
+                $item['_exists'] = true;
+                continue;
+            }
             $item['_exists'] = $shouldCheck
                 ? (!empty($item['filename']) && $this->service->fileExists($item['filename']))
                 : true;

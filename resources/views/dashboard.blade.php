@@ -149,8 +149,10 @@
                             </div>
                             @if(!empty($b['note']))<div class="muted">{{ $b['note'] }}</div>@endif
                             @if(!empty($b['monthly_keep']))<span class="badge badge-info" style="margin-top:4px">Monthly</span>@endif
-                            @if(!$isRestore && !empty($b['filename']) && str_ends_with(strtolower($b['filename']), '.zip'))
+                            @if(!$isRestore && !empty($b['encrypted']))
                                 <span class="badge badge-warning" style="margin-top:4px" title="AES-256 password protected">🔒 Encrypted</span>
+                            @elseif(!$isRestore && !empty($b['filename']) && str_ends_with(strtolower($b['filename']), '.zip'))
+                                <span class="badge badge-info" style="margin-top:4px" title="ZIP archive (no password)">🗜 ZIP</span>
                             @endif
                             @if($isRestore && !empty($b['restored_by']['user_name']))
                                 <div class="muted" style="font-size:11px;margin-top:3px">by {{ $b['restored_by']['user_name'] }}</div>

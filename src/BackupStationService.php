@@ -387,6 +387,8 @@ class BackupStationService
             'error' => null,
             'pinned' => false,
             'monthly_keep' => $this->shouldFlagAsMonthlyKeep(),
+            'archive' => $format,
+            'encrypted' => $format === 'encrypted-zip',
         ];
 
         $this->appendMetadata($entry);

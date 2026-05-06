@@ -232,6 +232,14 @@ class BackupStationController extends Controller
             }
         }
 
+        // Discard any stray output buffers before streaming the file.
+        // Whitespace/newlines outside the opening or closing PHP tags in
+        // any of the app's source files would otherwise be prepended to
+        // the binary response and corrupt the gzip/zip archive.
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+
         try {
             return $this->service->downloadResponse($entry);
         } catch (Throwable) {

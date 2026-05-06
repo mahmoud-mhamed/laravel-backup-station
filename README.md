@@ -12,7 +12,7 @@ Automatic database backups for Laravel — schedule, retention rules, monthly sn
 - ↺ **Restore** any successful backup back into its database with one click
 - ⚠ **Missing-file detection** — entries whose file no longer exists on the disk are flagged in the dashboard
 - 🐬 **Multi-driver** — MySQL/MariaDB, PostgreSQL, SQLite
-- 🗜️ **Gzip compression** — streamed, no temp files
+- 🗜️ **ZIP / Gzip / Plain** — backups default to `.sql.zip` (opens with any tool); switch to `.sql.gz` or plain `.sql` via `BACKUP_STATION_ARCHIVE`
 - ⬇️ **Download** any backup with one click
 - ✏️ **Rename** backups in place (extension preserved)
 - 🔍 **Search & filter** by filename, database, status

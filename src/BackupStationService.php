@@ -291,6 +291,30 @@ class BackupStationService
             && (string) config('backup-station.encryption.password', '') !== '';
     }
 
+    /**
+     * Resolve the archive format used for new backups.
+     * Returns: 'zip' | 'gzip' | 'none' | 'encrypted-zip'.
+     */
+    public function archiveFormat(): string
+    {
+        if ($this->isEncryptionEnabled()) return 'encrypted-zip';
+
+        $archive = config('backup-station.archive');
+        if (in_array($archive, ['zip', 'gzip', 'none'], true)) return $archive;
+
+        // Backward compat with the old `compress` boolean.
+        return config('backup-station.compress', true) ? 'gzip' : 'none';
+    }
+
+    protected function extensionFor(string $format): string
+    {
+        return match ($format) {
+            'gzip' => '.sql.gz',
+            'zip', 'encrypted-zip' => '.sql.zip',
+            default => '.sql',
+        };
+    }
+
     protected function backupConnection(string $connection, ?string $note = null): array
     {
         $startedAt = microtime(true);
@@ -304,25 +328,24 @@ class BackupStationService
         $driver = $config['driver'] ?? 'mysql';
         $database = $config['database'] ?? 'database';
 
-        $compress = (bool) config('backup-station.compress', true);
-        $encrypt = $this->isEncryptionEnabled();
+        $format = $this->archiveFormat();
+        // Stream gzip during the dump only when the final format is gzip;
+        // for zip/encrypted-zip we want a raw .sql we can wrap afterwards.
+        $compressDuringDump = ($format === 'gzip');
 
-        $extension = $compress ? '.sql.gz' : '.sql';
-        if ($encrypt) {
-            $extension .= '.zip';
-        }
+        $extension = $this->extensionFor($format);
         $filename = $this->buildFilename($connection, $database) . $extension;
 
-        // Always dump to a local temp file first. The (optional) encryption
-        // wrap also happens locally; only the final artifact is uploaded.
+        // Always dump to a local temp file first. The (optional) zip wrap
+        // also happens locally; only the final artifact is uploaded.
         $rawTemp = $this->newTempPath('raw_' . $filename);
         $uploadTemp = $rawTemp;
 
         try {
             match ($driver) {
-                'mysql', 'mariadb' => $this->dumpMysql($config, $rawTemp, $compress),
-                'pgsql', 'postgres' => $this->dumpPostgres($config, $rawTemp, $compress),
-                'sqlite' => $this->dumpSqlite($config, $rawTemp, $compress),
+                'mysql', 'mariadb' => $this->dumpMysql($config, $rawTemp, $compressDuringDump),
+                'pgsql', 'postgres' => $this->dumpPostgres($config, $rawTemp, $compressDuringDump),
+                'sqlite' => $this->dumpSqlite($config, $rawTemp, $compressDuringDump),
                 default => throw new RuntimeException("Unsupported driver [{$driver}]."),
             };
 
@@ -330,11 +353,15 @@ class BackupStationService
                 throw new RuntimeException("Backup file was not created or is empty.");
             }
 
-            if ($encrypt) {
-                $encryptedTemp = $this->newTempPath($filename);
-                $innerName = preg_replace('/\.zip$/i', '', $filename);
-                $this->encryptZip($rawTemp, $encryptedTemp, $innerName, (string) config('backup-station.encryption.password'));
-                $uploadTemp = $encryptedTemp;
+            if ($format === 'zip' || $format === 'encrypted-zip') {
+                $zippedTemp = $this->newTempPath($filename);
+                $innerName = preg_replace('/\.zip$/i', '', $filename); // ".sql"
+                if ($format === 'encrypted-zip') {
+                    $this->encryptZip($rawTemp, $zippedTemp, $innerName, (string) config('backup-station.encryption.password'));
+                } else {
+                    $this->plainZip($rawTemp, $zippedTemp, $innerName);
+                }
+                $uploadTemp = $zippedTemp;
             }
 
             $finalPath = $this->moveIntoStorage($uploadTemp, $filename);
@@ -1349,18 +1376,14 @@ class BackupStationService
 
         $tempFiles = [$stagedPath];
 
-        // Stage 2 — if the file is an encrypted ZIP, decrypt it first.
+        // Stage 2 — if the file is a ZIP (encrypted or plain), extract it.
         $lower = strtolower($filename);
         if (str_ends_with($lower, '.zip')) {
             $password = (string) config('backup-station.encryption.password', '');
-            if ($password === '') {
-                throw new RuntimeException('Backup is encrypted but no encryption password is configured.');
-            }
-            $decrypted = $this->newTempPath('dec_' . $filename);
-            $this->decryptZip($stagedPath, $decrypted, $password);
-            $stagedPath = $decrypted;
-            $tempFiles[] = $decrypted;
-            $lower = strtolower($filename);  // strip .zip from logical name
+            $extracted = $this->newTempPath('ext_' . $filename);
+            $this->extractZip($stagedPath, $extracted, $password);
+            $stagedPath = $extracted;
+            $tempFiles[] = $extracted;
             $lower = preg_replace('/\.zip$/', '', $lower);
         }
 
@@ -1511,6 +1534,32 @@ class BackupStationService
      * Wrap a file in a password-protected ZIP using AES-256.
      * The user can extract it later with any standard archive tool.
      */
+    /**
+     * Wrap a file in a plain (unencrypted) ZIP. Used when archive='zip'.
+     */
+    protected function plainZip(string $source, string $zipPath, string $innerName): void
+    {
+        if (!class_exists(\ZipArchive::class)) {
+            throw new RuntimeException('PHP zip extension is required for ZIP archives.');
+        }
+
+        $zip = new \ZipArchive();
+        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
+            throw new RuntimeException("Cannot create archive [{$zipPath}].");
+        }
+
+        if (!$zip->addFile($source, $innerName)) {
+            $zip->close();
+            @unlink($zipPath);
+            throw new RuntimeException('Failed to add file to archive.');
+        }
+
+        if (!$zip->close()) {
+            @unlink($zipPath);
+            throw new RuntimeException('Failed to write archive.');
+        }
+    }
+
     protected function encryptZip(string $source, string $zipPath, string $innerName, string $password): void
     {
         if (!class_exists(\ZipArchive::class)) {
@@ -1553,28 +1602,38 @@ class BackupStationService
     /**
      * Extract the first member of a password-protected ZIP into $outPath.
      */
-    protected function decryptZip(string $zipPath, string $outPath, string $password): void
+    /**
+     * Extract the first member of a ZIP archive into $outPath.
+     * Pass an empty password for plain (unencrypted) archives.
+     */
+    protected function extractZip(string $zipPath, string $outPath, string $password = ''): void
     {
         if (!class_exists(\ZipArchive::class)) {
-            throw new RuntimeException('PHP zip extension is required to decrypt this backup.');
+            throw new RuntimeException('PHP zip extension is required to read this backup.');
         }
 
         $zip = new \ZipArchive();
         if ($zip->open($zipPath) !== true) {
-            throw new RuntimeException('Cannot open encrypted archive.');
+            throw new RuntimeException('Cannot open archive.');
         }
-        $zip->setPassword($password);
+        if ($password !== '') {
+            $zip->setPassword($password);
+        }
 
         if ($zip->numFiles < 1) {
             $zip->close();
-            throw new RuntimeException('Encrypted archive is empty.');
+            throw new RuntimeException('Archive is empty.');
         }
 
         $innerName = $zip->getNameIndex(0);
         $stream = $zip->getStream($innerName);
         if (!$stream) {
             $zip->close();
-            throw new RuntimeException('Wrong password or corrupted archive.');
+            throw new RuntimeException(
+                $password !== ''
+                    ? 'Wrong password or corrupted archive.'
+                    : 'Archive entry is encrypted — set BACKUP_STATION_ENCRYPT_PASSWORD to extract.'
+            );
         }
 
         $out = fopen($outPath, 'wb');
@@ -1587,6 +1646,12 @@ class BackupStationService
             if (is_resource($out)) fclose($out);
             $zip->close();
         }
+    }
+
+    /** @deprecated alias kept for backward compatibility */
+    protected function decryptZip(string $zipPath, string $outPath, string $password): void
+    {
+        $this->extractZip($zipPath, $outPath, $password);
     }
 
     protected function gunzipTo(string $gzPath, string $sqlPath): void

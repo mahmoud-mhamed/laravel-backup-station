@@ -254,7 +254,22 @@
                     </tr>
                     <tr><td>Path / prefix</td><td><code>{{ $storage['path'] ?? 'backup-station' }}</code></td></tr>
                     <tr><td>Filename format</td><td><code>{{ $config['filename_format'] }}</code></td></tr>
-                    <tr><td>Compress (gzip)</td><td>{!! $bool($config['compress'] ?? true) !!}</td></tr>
+                    <tr>
+                        <td>Archive format</td>
+                        <td>
+                            @php
+                                $svc = app(\MahmoudMhamed\BackupStation\BackupStationService::class);
+                                $fmt = $svc->archiveFormat();
+                                $label = match ($fmt) {
+                                    'encrypted-zip' => 'ZIP (AES-256 encrypted)',
+                                    'zip' => 'ZIP',
+                                    'gzip' => 'Gzip (.sql.gz)',
+                                    default => 'Plain SQL',
+                                };
+                            @endphp
+                            <code>{{ $label }}</code>
+                        </td>
+                    </tr>
                     <tr>
                         <td>AES-256 encryption</td>
                         <td>

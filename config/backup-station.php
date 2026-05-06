@@ -162,13 +162,23 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Compression
+    | Archive Format
     |--------------------------------------------------------------------------
     |
-    | Compress SQL output with gzip. Files end with `.sql.gz` if true,
-    | otherwise `.sql`.
+    | What to wrap the raw SQL dump in before storing it.
+    |
+    |   'zip'   — standard ZIP (.sql.zip). DEFAULT. Opens with any archive
+    |              tool. If encryption (above) is enabled, this becomes a
+    |              password-protected AES-256 ZIP automatically.
+    |   'gzip'  — streamed gzip (.sql.gz). Smallest output, no archive
+    |              container.
+    |   'none'  — plain .sql, uncompressed.
     |
     */
+    'archive' => env('BACKUP_STATION_ARCHIVE', 'zip'),
+
+    // Legacy flag — kept only for users who haven't migrated to `archive`.
+    // When `archive` is set above this value is ignored.
     'compress' => true,
 
     /*

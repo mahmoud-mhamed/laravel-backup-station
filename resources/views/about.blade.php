@@ -124,9 +124,9 @@
                 </div>
                 <div class="feature">
                     <span class="icon">🗜</span>
-                    <h4>Streamed Gzip</h4>
-                    <p>Output is gzip-compressed on the fly without temp files, then streamed straight
-                       onto the target disk.</p>
+                    <h4>Archive Formats</h4>
+                    <p>Choose between <kbd>zip</kbd> (default — opens with any tool), streamed
+                       <kbd>gzip</kbd>, or plain SQL. Restoring auto-detects the format.</p>
                 </div>
                 <div class="feature">
                     <span class="icon">🗂</span>

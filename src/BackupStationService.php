@@ -1536,6 +1536,10 @@ class BackupStationService
      */
     /**
      * Wrap a file in a plain (unencrypted) ZIP. Used when archive='zip'.
+     *
+     * Uses addFile() + an explicit deflate compression method so the
+     * archive is readable by the broadest set of tools — including
+     * macOS Archive Utility, which rejects non-standard compression.
      */
     protected function plainZip(string $source, string $zipPath, string $innerName): void
     {
@@ -1544,8 +1548,9 @@ class BackupStationService
         }
 
         $zip = new \ZipArchive();
-        if ($zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) !== true) {
-            throw new RuntimeException("Cannot create archive [{$zipPath}].");
+        $rc = $zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+        if ($rc !== true) {
+            throw new RuntimeException("Cannot create archive [{$zipPath}] (libzip error {$rc}).");
         }
 
         if (!$zip->addFile($source, $innerName)) {
@@ -1554,10 +1559,34 @@ class BackupStationService
             throw new RuntimeException('Failed to add file to archive.');
         }
 
+        // Pin the compression method to standard deflate (8). Some libzip
+        // builds default to deflate64 or other variants that macOS Archive
+        // Utility refuses with "unsupported format".
+        if (defined('ZipArchive::CM_DEFLATE')) {
+            @$zip->setCompressionName($innerName, \ZipArchive::CM_DEFLATE);
+        }
+
         if (!$zip->close()) {
             @unlink($zipPath);
             throw new RuntimeException('Failed to write archive.');
         }
+
+        $this->verifyZip($zipPath);
+    }
+
+    /**
+     * Sanity-check a freshly written ZIP. Catches corruption / malformed
+     * entries early so we never upload a broken archive to S3.
+     */
+    protected function verifyZip(string $zipPath): void
+    {
+        $check = new \ZipArchive();
+        $rc = $check->open($zipPath, \ZipArchive::CHECKCONS);
+        if ($rc !== true) {
+            @unlink($zipPath);
+            throw new RuntimeException("Generated ZIP failed integrity check (libzip error {$rc}).");
+        }
+        $check->close();
     }
 
     protected function encryptZip(string $source, string $zipPath, string $innerName, string $password): void
@@ -1581,6 +1610,10 @@ class BackupStationService
             $zip->close();
             @unlink($zipPath);
             throw new RuntimeException('Failed to add file to encrypted archive.');
+        }
+
+        if (defined('ZipArchive::CM_DEFLATE')) {
+            @$zip->setCompressionName($innerName, \ZipArchive::CM_DEFLATE);
         }
 
         // AES-256 — strong encryption (requires libzip 1.2.0+).

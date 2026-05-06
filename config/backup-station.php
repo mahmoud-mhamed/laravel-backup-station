@@ -248,8 +248,10 @@ return [
     |     Useful for long-term archival without keeping every daily backup.
     |
     |     enabled:    Toggle the rule.
-    |     day:        Day-of-month to preserve (1-31). The first successful
-    |                 backup from that day each month is preserved.
+    |     day:        Day-of-month to preserve (1-31). Accepts a single int
+    |                 (e.g. 1) or an array of days (e.g. [1, 15, 28]). The
+    |                 first successful backup matching ANY listed day is
+    |                 preserved per (year-month, day) pair.
     |     keep_months: Number of monthly snapshots to retain. Older monthly
     |                  snapshots beyond this count are pruned.
     |
@@ -259,7 +261,7 @@ return [
         'keep_for_days' => 14,
         'monthly_keep' => [
             'enabled' => true,
-            'day' => 1,
+            'day' => [1],
             'keep_months' => 12,
         ],
 

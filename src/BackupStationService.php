@@ -870,19 +870,24 @@ class BackupStationService
             return false;
         }
 
-        $day = (int) ($rule['day'] ?? 1);
-        if (now()->day !== $day) {
+        $rawDays = $rule['day'] ?? 1;
+        $days = array_values(array_filter(
+            array_map('intval', (array) $rawDays),
+            fn ($d) => $d >= 1 && $d <= 31
+        ));
+
+        if (empty($days) || !in_array(now()->day, $days, true)) {
             return false;
         }
 
-        $monthKey = now()->format('Y-m');
+        $todayKey = now()->format('Y-m-d');
 
         foreach ($this->loadMetadata() as $entry) {
             if (($entry['status'] ?? null) !== 'success') {
                 continue;
             }
             $created = Carbon::parse($entry['created_at']);
-            if ($created->format('Y-m') === $monthKey && !empty($entry['monthly_keep'])) {
+            if ($created->format('Y-m-d') === $todayKey && !empty($entry['monthly_keep'])) {
                 return false;
             }
         }

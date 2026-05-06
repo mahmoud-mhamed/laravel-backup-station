@@ -150,7 +150,14 @@
                     <tr><td>Max backups</td><td><code>{{ $retention['max_backups'] ?: 'unlimited' }}</code></td></tr>
                     <tr><td>Keep for days</td><td><code>{{ $retention['keep_for_days'] ? $retention['keep_for_days'] . ' days' : 'forever' }}</code></td></tr>
                     <tr><td>Monthly keep</td><td>{!! $bool($monthly['enabled'] ?? false) !!}</td></tr>
-                    <tr><td>Monthly day</td><td><code>day {{ $monthly['day'] ?? 1 }}</code> of each month</td></tr>
+                    @php
+                        $monthlyDays = array_values(array_filter(
+                            array_map('intval', (array) ($monthly['day'] ?? [1])),
+                            fn ($d) => $d >= 1 && $d <= 31
+                        ));
+                        sort($monthlyDays);
+                    @endphp
+                    <tr><td>Monthly day(s)</td><td><code>{{ $monthlyDays ? 'day ' . implode(', ', $monthlyDays) : '—' }}</code> of each month</td></tr>
                     <tr><td>Monthly snapshots kept</td><td><code>{{ $monthly['keep_months'] ?? 0 }} months</code></td></tr>
                     <tr>
                         <td>Metadata size cap</td>

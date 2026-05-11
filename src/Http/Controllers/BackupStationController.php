@@ -146,8 +146,22 @@ class BackupStationController extends Controller
             return $v;
         };
 
-        $structure = $clean($request->input('tables_structure'));
-        $data = $clean($request->input('tables_data'));
+        // Prefer the JSON-encoded fields (avoids PHP max_input_vars truncation
+        // when a database has hundreds of tables). Fall back to the array form
+        // for backward compatibility with older callers / API clients.
+        $decodeJson = function ($v) {
+            if (!is_string($v) || $v === '') return null;
+            $decoded = json_decode($v, true);
+            return is_array($decoded) ? $decoded : null;
+        };
+
+        $structure = $decodeJson($request->input('tables_structure_json'))
+            ?? $clean($request->input('tables_structure'));
+        $data = $decodeJson($request->input('tables_data_json'))
+            ?? $clean($request->input('tables_data'));
+
+        if (is_array($structure)) $structure = $clean($structure);
+        if (is_array($data)) $data = $clean($data);
 
         $overrides = [];
         if ($structure !== null || $data !== null) {

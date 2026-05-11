@@ -308,8 +308,10 @@
 </div>
 
 <div class="modal-backdrop" id="run-modal">
-    <form method="POST" action="{{ route('backup-station.run') }}" class="modal" style="max-width:720px;max-height:88vh;display:flex;flex-direction:column;" data-loading="Creating backup…">
+    <form method="POST" action="{{ route('backup-station.run') }}" class="modal" style="max-width:720px;max-height:88vh;display:flex;flex-direction:column;" data-loading="Creating backup…" id="run-form" onsubmit="return serializeRunSelection();">
         @csrf
+        <input type="hidden" name="tables_structure_json" id="run-structure-json" value="">
+        <input type="hidden" name="tables_data_json" id="run-data-json" value="">
         <h3>Run Backup</h3>
         <p class="muted" style="margin:6px 0 14px">For each table, choose whether to dump its <em>structure</em> (CREATE TABLE) and/or its <em>data</em> (rows).</p>
 
@@ -538,8 +540,8 @@
                 + '<td class="col-name">' + safe + '</td>'
                 + '<td style="text-align:right;color:var(--text-muted)">' + (t.rows ? t.rows.toLocaleString() : '—') + '</td>'
                 + '<td style="text-align:right;color:var(--text-muted)">' + (t.size ? formatBytes(t.size) : '—') + '</td>'
-                + '<td class="col-cb"><input type="checkbox" class="run-cb-structure" name="tables_structure[]" value="' + safe + '" ' + sChecked + '></td>'
-                + '<td class="col-cb"><input type="checkbox" class="run-cb-data" name="tables_data[]" value="' + safe + '" ' + dChecked + '></td>'
+                + '<td class="col-cb"><input type="checkbox" class="run-cb-structure" value="' + safe + '" ' + sChecked + '></td>'
+                + '<td class="col-cb"><input type="checkbox" class="run-cb-data" value="' + safe + '" ' + dChecked + '></td>'
                 + '</tr>';
         }
         html += '</tbody></table>';
@@ -550,6 +552,22 @@
         bindRunSortHeaders();
         applyRunFilter();
         updateRunCounts();
+    }
+
+    // Collapse the per-row checkboxes into two JSON fields before submit.
+    // Avoids PHP's max_input_vars (default 1000) silently dropping tables
+    // when the database has many tables (e.g. 500+ → 1000+ inputs).
+    function serializeRunSelection() {
+        const structure = [];
+        const data = [];
+        document.querySelectorAll('.run-table-row').forEach(tr => {
+            const name = tr.dataset.name;
+            if (tr.querySelector('.run-cb-structure')?.checked) structure.push(name);
+            if (tr.querySelector('.run-cb-data')?.checked) data.push(name);
+        });
+        document.getElementById('run-structure-json').value = JSON.stringify(structure);
+        document.getElementById('run-data-json').value = JSON.stringify(data);
+        return true;
     }
 
     function collectRunSelection() {

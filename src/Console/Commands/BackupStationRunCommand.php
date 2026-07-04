@@ -48,8 +48,12 @@ class BackupStationRunCommand extends Command
             'mode' => in_array($mode, ['full', 'structure', 'data'], true) ? $mode : 'full',
         ];
 
+        // Runs fired by the Laravel scheduler always carry --schedule=<name>;
+        // only those respect the backup-scope settings (exclude / only).
+        $scheduled = (bool) $this->option('schedule');
+
         try {
-            $created = $service->runBackup($connection, $note, $overrides);
+            $created = $service->runBackup($connection, $note, $overrides, $scheduled);
         } catch (Throwable $e) {
             $this->error('Backup failed: ' . $e->getMessage());
             return self::FAILURE;

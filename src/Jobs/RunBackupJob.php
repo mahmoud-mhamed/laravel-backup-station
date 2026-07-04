@@ -19,6 +19,7 @@ class RunBackupJob implements ShouldQueue
         public ?string $connection = null,
         public ?string $note = null,
         public array $overrides = [],
+        public bool $scheduled = false,
     ) {
         // Per-job queue/connection routing from config — falls back to the
         // application's default queue connection / queue when not set.
@@ -37,6 +38,6 @@ class RunBackupJob implements ShouldQueue
 
     public function handle(BackupStationService $service): void
     {
-        $service->runBackup($this->connection, $this->note, $this->overrides);
+        $service->runBackup($this->connection, $this->note, $this->overrides, $this->scheduled);
     }
 }

@@ -76,7 +76,7 @@
                         <td>{{ $service->formatBytes((int)($e['size'] ?? 0)) }}</td>
                         <td>
                             <div>{{ \Carbon\Carbon::parse($e['created_at'])->format('Y-m-d H:i') }}</div>
-                            <div class="muted">{{ \Carbon\Carbon::parse($e['created_at'])->diffForHumans() }}</div>
+                            <div class="muted">{{ \Carbon\Carbon::parse($e['created_at'])->locale('en')->diffForHumans() }}</div>
                         </td>
                         <td><span class="badge badge-warning">{{ $reason }}</span></td>
                     </tr>

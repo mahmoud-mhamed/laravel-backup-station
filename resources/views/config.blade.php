@@ -290,7 +290,7 @@
                     <div class="icon">🔌</div>
                     <div>
                         <h3>Database Connections</h3>
-                        <div class="sub">Which Laravel connections are backed up</div>
+                        <div class="sub">Which databases are backed up</div>
                     </div>
                 </div>
                 <table class="cfg-table">
@@ -298,14 +298,43 @@
                         <td>Configured</td>
                         <td>
                             <div class="chips">
-                                @foreach(($config['connections'] ?: [config('database.default')]) as $c)
+                                @foreach(($resolvedConnections ?? ($config['connections'] ?: [config('database.default')])) as $c)
                                     <span class="chip on">{{ $c }}</span>
                                 @endforeach
-                                @if(empty($config['connections']))
+                                @if(empty($config['connections']) && empty($config['connections_provider']))
                                     <span class="muted" style="font-size:11px">(default)</span>
                                 @endif
                             </div>
                         </td>
+                    </tr>
+                    <tr>
+                        <td>Auto backup scope</td>
+                        <td>
+                            @php
+                                $bsScope = $backupScope ?? ['mode' => 'all', 'exclude' => [], 'only' => []];
+                            @endphp
+                            @if($bsScope['mode'] === 'only' && !empty($bsScope['only']))
+                                <span style="color:var(--warning-text); font-weight:600">Only:</span>
+                                @foreach($bsScope['only'] as $c)
+                                    <code>{{ $c }}</code>
+                                @endforeach
+                            @elseif(!empty($bsScope['exclude']))
+                                {{ count($effectiveConnections ?? []) }} of {{ count($resolvedConnections ?? []) }} databases
+                                <span class="muted">— excluded:</span>
+                                @foreach($bsScope['exclude'] as $c)
+                                    <code>{{ $c }}</code>
+                                @endforeach
+                            @else
+                                All {{ count($resolvedConnections ?? []) }} databases
+                            @endif
+                            <span class="muted" style="font-size:11px">
+                                — managed from {{ ($backupScopeSource ?? 'ui') === 'config' ? 'config file (scope.source=config)' : 'the Databases page' }}
+                            </span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td>Details</td>
+                        <td><a href="{{ route('backup-station.databases') }}" style="color:var(--primary)">Sizes, reachability, scope toggles → Databases page</a></td>
                     </tr>
                 </table>
             </div>

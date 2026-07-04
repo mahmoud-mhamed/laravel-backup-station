@@ -7,6 +7,7 @@ use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use MahmoudMhamed\BackupStation\Contracts\BackupConnectionProvider;
 use MahmoudMhamed\BackupStation\Notifications\BackupNotifier;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -42,6 +43,35 @@ class BackupStationService
     }
 
     /**
+     * Name of the active disk when it is publicly served — the `public`
+     * disk, or any local disk rooted inside a web-served folder
+     * (storage/app/public, public/, …). Null when the disk is private.
+     *
+     * Backups on a public disk can be downloaded by anyone who guesses the
+     * URL; the dashboard shows a warning banner when this returns a name.
+     */
+    public function publicDiskName(): ?string
+    {
+        $disk = $this->diskName();
+
+        if ($disk === 'public') {
+            return $disk;
+        }
+
+        $cfg = config("filesystems.disks.{$disk}", []);
+        if (($cfg['driver'] ?? null) === 'local') {
+            $root = (string) ($cfg['root'] ?? '');
+            foreach ([storage_path('app/public'), public_path()] as $publicRoot) {
+                if ($publicRoot && str_starts_with($root, rtrim($publicRoot, '/'))) {
+                    return $disk;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Folder/prefix on the disk where backups live.
      */
     public function storageRoot(): string
@@ -58,6 +88,200 @@ class BackupStationService
     public function metadataPath(): string
     {
         return $this->pathFor('backups.json');
+    }
+
+    /* -------------------------------------------------------------------- */
+    /* Connections                                                           */
+    /* -------------------------------------------------------------------- */
+
+    protected ?BackupConnectionProvider $connectionProvider = null;
+
+    protected bool $connectionProviderResolved = false;
+
+    public function connectionProvider(): ?BackupConnectionProvider
+    {
+        if (!$this->connectionProviderResolved) {
+            $this->connectionProviderResolved = true;
+            $class = config('backup-station.connections_provider');
+            if ($class && class_exists($class)) {
+                $instance = app($class);
+                if ($instance instanceof BackupConnectionProvider) {
+                    $this->connectionProvider = $instance;
+                }
+            }
+        }
+
+        return $this->connectionProvider;
+    }
+
+    /**
+     * Every configured connection name, before the backup-scope settings
+     * are applied. The dynamic provider (when configured) wins over the
+     * static `connections` list.
+     *
+     * @return string[]
+     */
+    public function allBackupConnections(): array
+    {
+        if ($provider = $this->connectionProvider()) {
+            $names = array_values(array_filter($provider->connections()));
+            if ($names) {
+                return $names;
+            }
+        }
+
+        return array_values(array_filter(
+            (array) (config('backup-station.connections') ?: [config('database.default')])
+        ));
+    }
+
+    /**
+     * Connections a full run covers, depending on how it was triggered:
+     * automatic (scheduled) runs respect the backup-scope settings,
+     * manual "run everything" requests cover every configured connection.
+     *
+     * @return string[]
+     */
+    public function connectionsForRun(bool $scheduled): array
+    {
+        return $scheduled ? $this->backupConnections() : $this->allBackupConnections();
+    }
+
+    /**
+     * Connection names an AUTOMATIC (scheduled) backup run covers — the
+     * configured list filtered by the backup-scope settings (exclusions,
+     * or an "only these" restriction). Manual runs ignore this scope:
+     * explicit single-connection runs may target any configured
+     * connection, and a manual "all databases" run covers everything.
+     *
+     * @return string[]
+     */
+    public function backupConnections(): array
+    {
+        $all = $this->allBackupConnections();
+        $settings = $this->loadBackupSettings();
+
+        if ($settings['mode'] === 'only' && $settings['only']) {
+            return array_values(array_intersect($all, $settings['only']));
+        }
+
+        if ($settings['exclude']) {
+            return array_values(array_diff($all, $settings['exclude']));
+        }
+
+        return $all;
+    }
+
+    /* -------------------------------------------------------------------- */
+    /* Backup scope settings (settings.json on the storage disk)             */
+    /* -------------------------------------------------------------------- */
+
+    public function settingsPath(): string
+    {
+        return $this->pathFor('settings.json');
+    }
+
+    /**
+     * Where the automatic-backup scope is managed:
+     * 'ui' (dashboard, stored in settings.json) or 'config' (the
+     * `scope.only` / `scope.exclude` arrays in config/backup-station.php).
+     */
+    public function scopeSource(): string
+    {
+        return config('backup-station.scope.source') === 'config' ? 'config' : 'ui';
+    }
+
+    /**
+     * @return array{mode:'all'|'only', exclude:string[], only:string[]}
+     */
+    public function loadBackupSettings(): array
+    {
+        if ($this->scopeSource() === 'config') {
+            $only = array_values(array_filter((array) config('backup-station.scope.only', []), 'is_string'));
+            $exclude = array_values(array_filter((array) config('backup-station.scope.exclude', []), 'is_string'));
+
+            return [
+                'mode' => $only ? 'only' : 'all',
+                'exclude' => $exclude,
+                'only' => $only,
+            ];
+        }
+
+        $defaults = ['mode' => 'all', 'exclude' => [], 'only' => []];
+
+        try {
+            $disk = $this->disk();
+            if (!$disk->exists($this->settingsPath())) {
+                return $defaults;
+            }
+            $data = json_decode($disk->get($this->settingsPath()) ?: '[]', true);
+            if (!is_array($data)) {
+                return $defaults;
+            }
+
+            return [
+                'mode' => ($data['mode'] ?? 'all') === 'only' ? 'only' : 'all',
+                'exclude' => array_values(array_filter((array) ($data['exclude'] ?? []), 'is_string')),
+                'only' => array_values(array_filter((array) ($data['only'] ?? []), 'is_string')),
+            ];
+        } catch (Throwable) {
+            return $defaults;
+        }
+    }
+
+    public function saveBackupSettings(array $settings): void
+    {
+        $this->disk()->put($this->settingsPath(), json_encode([
+            'mode' => ($settings['mode'] ?? 'all') === 'only' ? 'only' : 'all',
+            'exclude' => array_values(array_unique(array_filter((array) ($settings['exclude'] ?? []), 'is_string'))),
+            'only' => array_values(array_unique(array_filter((array) ($settings['only'] ?? []), 'is_string'))),
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    }
+
+    /**
+     * Human labels for the backup connections, keyed by connection name.
+     * Falls back to the raw name when the provider has no label for it.
+     *
+     * @return array<string,string>
+     */
+    public function connectionLabels(): array
+    {
+        $names = $this->allBackupConnections();
+        $labels = array_combine($names, $names);
+
+        if ($provider = $this->connectionProvider()) {
+            foreach ($provider->labels() as $name => $label) {
+                if (isset($labels[$name]) && is_string($label) && $label !== '') {
+                    $labels[$name] = $label;
+                }
+            }
+        }
+
+        return $labels;
+    }
+
+    /**
+     * Resolve the DB config for a connection name: Laravel-declared
+     * connections first, then the dynamic provider. Provider-resolved
+     * configs are registered into database.connections so DB::connection()
+     * works for them everywhere in the package.
+     */
+    public function connectionConfig(string $connection): ?array
+    {
+        $cfg = config("database.connections.{$connection}");
+        if ($cfg) {
+            return $cfg;
+        }
+
+        $cfg = $this->connectionProvider()?->configFor($connection);
+        if (!$cfg) {
+            return null;
+        }
+
+        config(["database.connections.{$connection}" => $cfg]);
+        DB::purge($connection);
+
+        return $cfg;
     }
 
     /* -------------------------------------------------------------------- */
@@ -111,7 +335,13 @@ class BackupStationService
         'mode' => 'full',
     ];
 
-    public function runBackup(?string $connection = null, ?string $note = null, array $overrides = []): array
+    /**
+     * @param bool $scheduled True for automatic (scheduler-triggered) runs —
+     *                        only these respect the backup-scope settings
+     *                        (exclusions / "only" restriction). Manual runs
+     *                        without an explicit connection cover everything.
+     */
+    public function runBackup(?string $connection = null, ?string $note = null, array $overrides = [], bool $scheduled = false): array
     {
         $this->runOverrides = array_merge($this->runOverrides, $overrides);
 
@@ -119,20 +349,21 @@ class BackupStationService
 
         $connections = $connection
             ? [$connection]
-            : (config('backup-station.connections') ?: [config('database.default')]);
+            : $this->connectionsForRun($scheduled);
 
         $created = [];
 
         foreach (array_filter($connections) as $conn) {
             $started = microtime(true);
+            $connCfg = $this->connectionConfig($conn);
             try {
                 $created[] = $this->backupConnection($conn, $note);
             } catch (Throwable $e) {
                 $this->appendMetadata([
                     'id' => (string) Str::uuid(),
                     'connection' => $conn,
-                    'database' => config("database.connections.{$conn}.database"),
-                    'driver' => config("database.connections.{$conn}.driver"),
+                    'database' => $connCfg['database'] ?? null,
+                    'driver' => $connCfg['driver'] ?? null,
                     'disk' => $this->diskName(),
                     'filename' => null,
                     'path' => null,
@@ -148,8 +379,8 @@ class BackupStationService
 
                 $this->notifier()->send('failure', [
                     'connection' => $conn,
-                    'database' => config("database.connections.{$conn}.database"),
-                    'driver' => config("database.connections.{$conn}.driver"),
+                    'database' => $connCfg['database'] ?? null,
+                    'driver' => $connCfg['driver'] ?? null,
                     'duration' => $this->formatDuration((int) round((microtime(true) - $started) * 1000)),
                     'tables' => $this->describeTableSelection(),
                     'mode' => $this->describeMode(),
@@ -158,8 +389,20 @@ class BackupStationService
                     'time' => now()->toDateTimeString(),
                 ]);
 
-                throw $e;
+                // A single explicitly-requested connection fails hard. On a
+                // multi-connection run, one broken database (e.g. a stale
+                // tenant) must not abort the remaining backups — the failure
+                // is already recorded in metadata and notified above.
+                if ($connection) {
+                    throw $e;
+                }
+
+                $lastError = $e;
             }
+        }
+
+        if ($created === [] && isset($lastError)) {
+            throw $lastError;
         }
 
         $this->applyRetentionPolicy();
@@ -178,30 +421,57 @@ class BackupStationService
     public function databaseSize(?string $connection = null): array
     {
         $connection = $connection ?: config('database.default');
-        $cfg = config("database.connections.{$connection}");
+        $cfg = $this->connectionConfig($connection);
         if (!$cfg) {
-            return ['size' => 0, 'database' => null, 'driver' => null, 'connection' => $connection];
+            return ['size' => 0, 'database' => null, 'driver' => null, 'connection' => $connection, 'ok' => false, 'tables' => null];
         }
 
         $driver = $cfg['driver'] ?? 'mysql';
         $database = $cfg['database'] ?? null;
         $size = 0;
+        $tables = null;
+        $ok = true;
 
         try {
-            $size = match ($driver) {
-                'mysql', 'mariadb' => (int) (DB::connection($connection)->selectOne(
-                    'SELECT COALESCE(SUM(data_length + index_length), 0) AS bytes
-                       FROM information_schema.TABLES
-                      WHERE TABLE_SCHEMA = DATABASE()'
-                )->bytes ?? 0),
-                'pgsql', 'postgres' => (int) (DB::connection($connection)->selectOne(
-                    'SELECT pg_database_size(current_database()) AS bytes'
-                )->bytes ?? 0),
-                'sqlite' => is_file((string) $database) ? (int) filesize((string) $database) : 0,
-                default => 0,
-            };
+            switch ($driver) {
+                case 'mysql':
+                case 'mariadb':
+                    $row = DB::connection($connection)->selectOne(
+                        "SELECT COALESCE(SUM(data_length + index_length), 0) AS bytes,
+                                COALESCE(SUM(CASE WHEN TABLE_TYPE = 'BASE TABLE' THEN 1 ELSE 0 END), 0) AS tbls
+                           FROM information_schema.TABLES
+                          WHERE TABLE_SCHEMA = DATABASE()"
+                    );
+                    $size = (int) ($row->bytes ?? 0);
+                    $tables = (int) ($row->tbls ?? 0);
+                    break;
+                case 'pgsql':
+                case 'postgres':
+                    $size = (int) (DB::connection($connection)->selectOne(
+                        'SELECT pg_database_size(current_database()) AS bytes'
+                    )->bytes ?? 0);
+                    $tables = (int) (DB::connection($connection)->selectOne(
+                        "SELECT COUNT(*) AS tbls
+                           FROM pg_class c
+                           JOIN pg_namespace n ON n.oid = c.relnamespace
+                          WHERE c.relkind = 'r' AND n.nspname = current_schema()"
+                    )->tbls ?? 0);
+                    break;
+                case 'sqlite':
+                    if (is_file((string) $database)) {
+                        $size = (int) filesize((string) $database);
+                        $tables = (int) (DB::connection($connection)->selectOne(
+                            "SELECT COUNT(*) AS tbls FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+                        )->tbls ?? 0);
+                    } else {
+                        $ok = false;
+                    }
+                    break;
+            }
         } catch (Throwable) {
             $size = 0;
+            $tables = null;
+            $ok = false;
         }
 
         return [
@@ -209,13 +479,84 @@ class BackupStationService
             'database' => $database,
             'driver' => $driver,
             'connection' => $connection,
+            'ok' => $ok,
+            'tables' => $tables,
         ];
+    }
+
+    /**
+     * Combined live size of every configured database, regardless of the
+     * automatic-backup scope. MySQL/MariaDB connections sharing one server
+     * are aggregated in a single information_schema query; other drivers
+     * fall back to a per-connection databaseSize() call.
+     *
+     * @return array{size:int, count:int, missing:int}
+     */
+    public function databasesSizeSummary(): array
+    {
+        $total = 0;
+        $counted = 0;
+        $missing = 0;
+
+        $mysqlGroups = [];
+        $others = [];
+
+        foreach ($this->allBackupConnections() as $conn) {
+            $cfg = $this->connectionConfig($conn);
+            if (!$cfg) {
+                $missing++;
+                continue;
+            }
+            $driver = $cfg['driver'] ?? 'mysql';
+            if (in_array($driver, ['mysql', 'mariadb'], true) && !empty($cfg['database'])) {
+                $key = ($cfg['host'] ?? '') . ':' . ($cfg['port'] ?? '') . ':' . ($cfg['username'] ?? '');
+                $mysqlGroups[$key]['conn'] ??= $conn;
+                $mysqlGroups[$key]['schemas'][(string) $cfg['database']] = true;
+            } else {
+                $others[] = $conn;
+            }
+        }
+
+        foreach ($mysqlGroups as $group) {
+            $schemas = array_keys($group['schemas']);
+            try {
+                $placeholders = implode(',', array_fill(0, count($schemas), '?'));
+                $rows = DB::connection($group['conn'])->select(
+                    "SELECT TABLE_SCHEMA AS db, COALESCE(SUM(data_length + index_length), 0) AS bytes
+                       FROM information_schema.TABLES
+                      WHERE TABLE_SCHEMA IN ({$placeholders})
+                      GROUP BY TABLE_SCHEMA",
+                    $schemas
+                );
+                foreach ($rows as $row) {
+                    $total += (int) $row->bytes;
+                    $counted++;
+                }
+                // Schemas absent from information_schema don't exist (or are
+                // invisible to this user) — count them as unreachable.
+                $missing += count($schemas) - count($rows);
+            } catch (Throwable) {
+                $missing += count($schemas);
+            }
+        }
+
+        foreach ($others as $conn) {
+            $size = $this->databaseSize($conn);
+            if ($size['ok']) {
+                $total += (int) $size['size'];
+                $counted++;
+            } else {
+                $missing++;
+            }
+        }
+
+        return ['size' => $total, 'count' => $counted, 'missing' => $missing];
     }
 
     public function listTables(?string $connection = null): array
     {
         $connection = $connection ?: config('database.default');
-        $cfg = config("database.connections.{$connection}");
+        $cfg = $this->connectionConfig($connection);
         if (!$cfg) {
             throw new RuntimeException("Connection [{$connection}] is not configured.");
         }
@@ -319,7 +660,7 @@ class BackupStationService
     {
         $startedAt = microtime(true);
 
-        $config = config("database.connections.{$connection}");
+        $config = $this->connectionConfig($connection);
 
         if (!$config) {
             throw new RuntimeException("Connection [{$connection}] is not configured.");
@@ -1288,7 +1629,7 @@ class BackupStationService
         }
 
         $connection = $entry['connection'] ?? config('database.default');
-        $dbConfig = config("database.connections.{$connection}");
+        $dbConfig = $this->connectionConfig($connection);
         if (!$dbConfig) {
             throw new RuntimeException("Connection [{$connection}] is not configured.");
         }
@@ -2098,9 +2439,14 @@ class BackupStationService
         return array_sum(array_map(fn ($e) => (int) ($e['size'] ?? 0), $this->loadMetadata()));
     }
 
-    public function stats(): array
+    /**
+     * Aggregate figures for the dashboard cards. Pass a subset of metadata
+     * entries (e.g. the currently filtered listing) to scope every figure
+     * to it; defaults to all entries.
+     */
+    public function stats(?array $entries = null): array
     {
-        $all = $this->loadMetadata();
+        $all = $entries ?? $this->loadMetadata();
         $success = array_filter($all, fn ($e) => ($e['status'] ?? null) === 'success');
         $failed = array_filter($all, fn ($e) => ($e['status'] ?? null) === 'failed');
         $monthly = array_filter($all, fn ($e) => !empty($e['monthly_keep']));
@@ -2113,14 +2459,53 @@ class BackupStationService
             }
         }
 
+        // Backup-only figures — restore events also live in the metadata
+        // (with status success/failed), so exclude them from backup stats.
+        $isBackup = fn ($e) => ($e['type'] ?? null) !== 'restore';
+        $successBackups = array_filter($success, $isBackup);
+        $failedBackups = array_filter($failed, $isBackup);
+
+        $firstSuccessAt = null;
+        $lastSuccessAt = null;
+        $sizeSum = 0;
+        $durationSum = 0;
+        $durationCount = 0;
+        foreach ($successBackups as $entry) {
+            $sizeSum += (int) ($entry['size'] ?? 0);
+            if (!empty($entry['duration_ms'])) {
+                $durationSum += (int) $entry['duration_ms'];
+                $durationCount++;
+            }
+            if (empty($entry['created_at'])) {
+                continue;
+            }
+            $at = $entry['created_at'];
+            if ($firstSuccessAt === null || strcmp($at, $firstSuccessAt) < 0) {
+                $firstSuccessAt = $at;
+            }
+            if ($lastSuccessAt === null || strcmp($at, $lastSuccessAt) > 0) {
+                $lastSuccessAt = $at;
+            }
+        }
+
+        $attempts = count($successBackups) + count($failedBackups);
+
         return [
             'total' => count($all),
             'success' => count($success),
             'failed' => count($failed),
             'monthly' => count($monthly),
             'pinned' => count($pinned),
-            'total_size' => $this->totalSize(),
+            'total_size' => array_sum(array_map(fn ($e) => (int) ($e['size'] ?? 0), $all)),
             'latest' => $latest,
+            'first_success_at' => $firstSuccessAt,
+            'last_success_at' => $lastSuccessAt,
+            'backups_total' => $attempts,
+            'backups_success' => count($successBackups),
+            'backups_failed' => count($failedBackups),
+            'success_rate' => $attempts > 0 ? (int) round(count($successBackups) / $attempts * 100) : null,
+            'avg_size' => count($successBackups) > 0 ? (int) round($sizeSum / count($successBackups)) : 0,
+            'avg_duration_ms' => $durationCount > 0 ? (int) round($durationSum / $durationCount) : null,
         ];
     }
 

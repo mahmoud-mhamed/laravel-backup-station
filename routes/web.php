@@ -24,6 +24,7 @@ Route::group([
         ->middleware($actionThrottle)
         ->name('backup-station.download');
     Route::get('/config', [BackupStationController::class, 'config'])->name('backup-station.config');
+    Route::get('/databases', [BackupStationController::class, 'databases'])->name('backup-station.databases');
     Route::get('/forecast', [BackupStationController::class, 'forecast'])->name('backup-station.forecast');
     Route::get('/tables', [BackupStationController::class, 'tables'])->name('backup-station.tables');
     Route::get('/about', [BackupStationController::class, 'about'])->name('backup-station.about');
@@ -37,6 +38,8 @@ Route::group([
         Route::post('/rename', [BackupStationController::class, 'rename'])->name('backup-station.rename');
         Route::post('/pin', [BackupStationController::class, 'pin'])->name('backup-station.pin');
         Route::post('/cleanup', [BackupStationController::class, 'cleanup'])->name('backup-station.cleanup');
+        Route::post('/databases/toggle', [BackupStationController::class, 'toggleConnection'])->name('backup-station.databases.toggle');
+        Route::post('/databases/restrict', [BackupStationController::class, 'restrictConnection'])->name('backup-station.databases.restrict');
         Route::post('/clear-all', [BackupStationController::class, 'clearAll'])->name('backup-station.clear-all');
     });
 

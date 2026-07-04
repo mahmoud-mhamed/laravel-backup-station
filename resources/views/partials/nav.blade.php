@@ -7,6 +7,7 @@
     </a>
     <div class="nav-links">
         <a href="{{ route('backup-station.index') }}" class="{{ request()->routeIs('backup-station.index') ? 'active' : '' }}">Backups</a>
+        <a href="{{ route('backup-station.databases') }}" class="{{ request()->routeIs('backup-station.databases') ? 'active' : '' }}">Databases</a>
         <a href="{{ route('backup-station.forecast') }}" class="{{ request()->routeIs('backup-station.forecast') ? 'active' : '' }}">Forecast</a>
         <a href="{{ route('backup-station.config') }}" class="{{ request()->routeIs('backup-station.config') ? 'active' : '' }}">Config</a>
         <a href="{{ route('backup-station.about') }}" class="{{ request()->routeIs('backup-station.about') ? 'active' : '' }}">About</a>
@@ -19,3 +20,17 @@
         @endif
     </div>
 </nav>
+
+@php
+    $bsPublicDisk = app(\MahmoudMhamed\BackupStation\BackupStationService::class)->publicDiskName();
+@endphp
+@if($bsPublicDisk)
+    <div style="background:var(--danger-bg, #fef2f2);border-bottom:1px solid var(--danger-border, #fecaca);color:var(--danger-text, #b91c1c);padding:10px 24px;font-size:13px;display:flex;gap:10px;align-items:center;line-height:1.5;">
+        <span style="font-size:16px">⚠️</span>
+        <span>
+            <strong>Backups are stored on a publicly accessible disk (<code>{{ $bsPublicDisk }}</code>).</strong>
+            Anyone who guesses the file URL can download your database dumps.
+            Set <code>BACKUP_STATION_DISK</code> to a private disk (e.g. <code>local</code>, <code>s3</code>) in your .env.
+        </span>
+    </div>
+@endif

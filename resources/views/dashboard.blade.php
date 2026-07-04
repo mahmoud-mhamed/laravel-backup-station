@@ -19,44 +19,63 @@
             <div class="flash flash-error">{{ session('flash_error') }}</div>
         @endif
 
+        @php
+            $bsRate = $stats['success_rate'] ?? null;
+            $bsRateColor = $bsRate === null ? 'var(--text-muted)'
+                : ($bsRate >= 90 ? 'var(--success-text)' : ($bsRate >= 70 ? 'var(--warning-text)' : 'var(--danger-text)'));
+            $bsTargets = count($connectionLabels ?? []);
+        @endphp
         <div class="stat-grid">
             <div class="stat">
                 <div class="label">Total Backups</div>
-                <div class="value">{{ $stats['total'] }}</div>
-                <div class="sub">{{ $stats['success'] }} success · {{ $stats['failed'] }} failed</div>
+                <div class="value">{{ $stats['backups_total'] ?? $stats['total'] }}</div>
+                <div class="sub">
+                    <span style="color:var(--success-text)">✓ {{ $stats['backups_success'] ?? $stats['success'] }} success</span>
+                    <span style="color:var(--danger-text)">· ✗ {{ $stats['backups_failed'] ?? $stats['failed'] }} failed</span>
+                </div>
+                <div class="sub">{{ $stats['monthly'] }} monthly · {{ $stats['pinned'] }} pinned</div>
+            </div>
+            <div class="stat" style="border-left: 3px solid {{ $bsRateColor }}">
+                <div class="label">Success Rate</div>
+                <div class="value" style="color: {{ $bsRateColor }}">{{ $bsRate === null ? '—' : $bsRate . '%' }}</div>
+                <div class="sub">avg duration {{ $service->formatDuration($stats['avg_duration_ms'] ?? null) }}</div>
             </div>
             <div class="stat" style="border-left: 3px solid var(--primary)">
                 <div class="label">Total Size</div>
                 <div class="value" style="color: var(--primary)">{{ $service->formatBytes($stats['total_size']) }}</div>
-                <div class="sub">on <code>{{ $service->diskName() }}</code></div>
+                <div class="sub">on <code>{{ $service->diskName() }}</code> · avg {{ $service->formatBytes((int) ($stats['avg_size'] ?? 0)) }}/backup</div>
             </div>
             <div class="stat" style="border-left: 3px solid var(--info-text)">
-                <div class="label">Database Size</div>
-                <div class="value" style="color: var(--info-text)">{{ $service->formatBytes((int)($dbSize['size'] ?? 0)) }}</div>
-                <div class="sub">
-                    <code>{{ $dbSize['database'] ?? '—' }}</code>
-                    <span class="muted">· {{ $dbSize['driver'] ?? '' }}</span>
-                </div>
+                @if(!empty($dbSizeSummary))
+                    <div class="label">Databases Size</div>
+                    <div class="value" style="color: var(--info-text)">{{ $service->formatBytes((int) $dbSizeSummary['size']) }}</div>
+                    <div class="sub">total of {{ $dbSizeSummary['count'] }} databases</div>
+                    @if($dbSizeSummary['missing'] > 0)
+                        <div class="sub" style="color:var(--danger-text)">{{ $dbSizeSummary['missing'] }} unreachable</div>
+                    @endif
+                @else
+                    <div class="label">Database Size</div>
+                    <div class="value" style="color: var(--info-text)">{{ $service->formatBytes((int)($dbSize['size'] ?? 0)) }}</div>
+                    <div class="sub">
+                        <code>{{ $dbSize['database'] ?? '—' }}</code>
+                        <span class="muted">· {{ $dbSize['driver'] ?? '' }}</span>
+                    </div>
+                @endif
             </div>
-            <div class="stat">
-                <div class="label">Successful</div>
-                <div class="value" style="color: var(--success-text)">{{ $stats['success'] }}</div>
-            </div>
-            <div class="stat">
-                <div class="label">Failed</div>
-                <div class="value" style="color: var(--danger-text)">{{ $stats['failed'] }}</div>
-            </div>
-            <div class="stat">
-                <div class="label">Monthly Snapshots</div>
-                <div class="value">{{ $stats['monthly'] }}</div>
-                <div class="sub">{{ $stats['pinned'] }} marked</div>
-            </div>
-            <div class="stat">
-                <div class="label">Latest</div>
-                <div class="value" style="font-size:14px; line-height:1.4">
+            <div class="stat" style="border-left: 3px solid var(--success-text)">
+                <div class="label">Latest Backup</div>
+                <div class="value" style="font-size:13px; line-height:1.6">
                     @if($stats['latest'])
-                        <div class="filename">{{ $stats['latest']['filename'] }}</div>
-                        <div class="muted">{{ \Carbon\Carbon::parse($stats['latest']['created_at'])->diffForHumans() }}</div>
+                        <div class="filename stat-filename" title="{{ $stats['latest']['filename'] }}">{{ $stats['latest']['filename'] }}</div>
+                        <div class="muted" style="font-size:12px">{{ \Carbon\Carbon::parse($stats['latest']['created_at'])->locale('en')->diffForHumans() }} · {{ \Carbon\Carbon::parse($stats['latest']['created_at'])->format('Y-m-d H:i') }}</div>
+                        @if(!empty($stats['first_success_at']) && !empty($stats['last_success_at']))
+                            @php
+                                $bsFirst = \Carbon\Carbon::parse($stats['first_success_at']);
+                                $bsLast = \Carbon\Carbon::parse($stats['last_success_at']);
+                            @endphp
+                            <div><span class="muted">First:</span> {{ $bsFirst->format('Y-m-d H:i') }}</div>
+                            <div class="muted">Span: {{ $bsFirst->equalTo($bsLast) ? '—' : $bsFirst->locale('en')->diffForHumans($bsLast, ['syntax' => \Carbon\CarbonInterface::DIFF_ABSOLUTE, 'parts' => 2]) }}</div>
+                        @endif
                     @else
                         <span class="muted">No backups yet</span>
                     @endif
@@ -90,13 +109,21 @@
                     <label class="muted" style="font-size:12px;">To
                         <input type="date" name="to" value="{{ $to }}" />
                     </label>
+                    @if(count($connectionLabels ?? []) > 1)
+                        <select name="connection" title="Filter by database">
+                            <option value="">All databases</option>
+                            @foreach($connectionLabels as $bsName => $bsLabel)
+                                <option value="{{ $bsName }}" @selected($connection === $bsName)>{{ $bsLabel }}</option>
+                            @endforeach
+                        </select>
+                    @endif
                     <select name="per_page">
                         @foreach(config('backup-station.viewer.per_page_options', [10,25,50,100]) as $opt)
                             <option value="{{ $opt }}" @selected($perPage == $opt)>{{ $opt }} / page</option>
                         @endforeach
                     </select>
                     <button class="btn" type="submit">Filter</button>
-                    @if($search || ($status && $status !== 'all') || ($pinned && $pinned !== 'all') || $from || $to)
+                    @if($search || ($status && $status !== 'all') || ($pinned && $pinned !== 'all') || $from || $to || $connection)
                         <a class="btn" href="{{ route('backup-station.index') }}" title="Reset filters">✕ Reset</a>
                     @endif
                 </form>
@@ -181,7 +208,7 @@
                         </td>
                         <td>
                             <div>{{ \Carbon\Carbon::parse($b['created_at'])->format('Y-m-d H:i') }}</div>
-                            <div class="muted">{{ \Carbon\Carbon::parse($b['created_at'])->diffForHumans() }}</div>
+                            <div class="muted">{{ \Carbon\Carbon::parse($b['created_at'])->locale('en')->diffForHumans() }}</div>
                             @if(!empty($b['last_restored_at']))
                                 @php
                                     $lastStatus = $b['last_restore_status'] ?? 'success';
@@ -189,7 +216,7 @@
                                     $lastUser = collect((array)($b['restores'] ?? []))->last()['user_name'] ?? null;
                                 @endphp
                                 <div class="muted" style="margin-top:4px;color:{{ $color }}" title="Last restore">
-                                    ↺ Restored {{ \Carbon\Carbon::parse($b['last_restored_at'])->diffForHumans() }}
+                                    ↺ Restored {{ \Carbon\Carbon::parse($b['last_restored_at'])->locale('en')->diffForHumans() }}
                                     @if(!empty($b['last_restore_ms']))
                                         <span style="opacity:0.8">({{ $service->formatDuration($b['last_restore_ms']) }})</span>
                                     @endif
@@ -313,19 +340,38 @@
         <input type="hidden" name="tables_structure_json" id="run-structure-json" value="">
         <input type="hidden" name="tables_data_json" id="run-data-json" value="">
         <h3>Run Backup</h3>
-        <p class="muted" style="margin:6px 0 14px">For each table, choose whether to dump its <em>structure</em> (CREATE TABLE) and/or its <em>data</em> (rows).</p>
 
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-            <input type="text" id="run-table-search" placeholder="Filter tables…" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:12px;">
-        </div>
-
-        <div id="run-tables-wrapper" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);min-height:200px;max-height:380px">
-            <div id="run-tables-list">
-                <div class="muted" style="text-align:center;padding:30px">Loading tables…</div>
+        @php
+            $bsRunTargets = $connectionLabels ?? [];
+        @endphp
+        @if(count($bsRunTargets) > 1)
+            <div style="margin:10px 0 12px">
+                <label class="muted" style="font-size:12px">Backup target</label>
+                <select name="connection" id="run-connection" style="width:100%;margin-top:4px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:13px">
+                    <option value="">All databases ({{ count($bsRunTargets) }})</option>
+                    @foreach($bsRunTargets as $bsName => $bsLabel)
+                        <option value="{{ $bsName }}">{{ $bsLabel === $bsName ? $bsName : $bsLabel . ' — ' . $bsName }}</option>
+                    @endforeach
+                </select>
+                <div class="muted" style="font-size:11px;margin-top:4px" id="run-target-hint">Full dump of every database listed above.</div>
             </div>
-        </div>
-        <div class="muted" style="font-size:11px;margin-top:6px">
-            <span id="run-struct-count">0</span> structure · <span id="run-data-count">0</span> data
+        @endif
+
+        <div id="run-tables-section" style="flex:1;min-height:0;display:flex;flex-direction:column">
+            <p class="muted" style="margin:6px 0 14px">For each table, choose whether to dump its <em>structure</em> (CREATE TABLE) and/or its <em>data</em> (rows).</p>
+
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+                <input type="text" id="run-table-search" placeholder="Filter tables…" style="flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:12px;">
+            </div>
+
+            <div id="run-tables-wrapper" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);min-height:200px;max-height:380px">
+                <div id="run-tables-list">
+                    <div class="muted" style="text-align:center;padding:30px">Loading tables…</div>
+                </div>
+            </div>
+            <div class="muted" style="font-size:11px;margin-top:6px">
+                <span id="run-struct-count">0</span> structure · <span id="run-data-count">0</span> data
+            </div>
         </div>
 
         <div style="margin-top:12px">
@@ -351,6 +397,22 @@
     .run-tbl-table .rows-tag { font-size:11px; color:var(--text-light); margin-left:6px; }
     .run-tbl-table th.run-sort { cursor:pointer; user-select:none; }
     .run-tbl-table th.run-sort:hover { color:var(--primary); }
+
+    /* Searchable database dropdown (filter bar + run dialog) */
+    .bs-combo { position:relative; display:inline-block; min-width:190px; }
+    #run-modal .bs-combo { display:block; width:100%; margin-top:4px; }
+    .bs-combo-btn { width:100%; text-align:left; padding:7px 28px 7px 10px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg); color:var(--text); font-size:13px; cursor:pointer; position:relative; font-family:inherit; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .bs-combo-btn:focus { border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-glow); outline:none; }
+    .bs-combo-btn::after { content:'▾'; position:absolute; right:9px; top:50%; transform:translateY(-50%); color:var(--text-muted); font-size:11px; }
+    .bs-combo-panel { display:none; position:absolute; top:calc(100% + 4px); left:0; right:0; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-lg); z-index:60; padding:6px; }
+    .bs-combo-panel.open { display:block; }
+    .bs-combo-search { width:100%; padding:7px 10px; border:1px solid var(--border); border-radius:var(--radius-sm); background:var(--bg); color:var(--text); font-size:12.5px; outline:none; margin-bottom:6px; font-family:inherit; }
+    .bs-combo-search:focus { border-color:var(--primary); box-shadow:0 0 0 3px var(--primary-glow); }
+    .bs-combo-list { max-height:240px; overflow-y:auto; }
+    .bs-combo-opt { padding:7px 10px; border-radius:var(--radius-sm); cursor:pointer; font-size:12.5px; }
+    .bs-combo-opt:hover { background:var(--hover); }
+    .bs-combo-opt.active { background:var(--primary); color:#fff; }
+    .bs-combo-empty { padding:10px; color:var(--text-muted); font-size:12px; text-align:center; }
 </style>
 
 <div class="modal-backdrop" id="confirm-modal">
@@ -472,9 +534,142 @@
     const runModal = document.getElementById('run-modal');
     let runTablesLoaded = false;
 
+    // Target selector — only rendered when more than one connection exists.
+    // Value '' means "all databases": the table picker is hidden (full dumps)
+    // and no table selection is submitted.
+    const runConnSelect = document.getElementById('run-connection');
+    const runTablesSection = document.getElementById('run-tables-section');
+
+    function runTargetIsAll() {
+        return !!runConnSelect && runConnSelect.value === '';
+    }
+
+    function syncRunTargetUi() {
+        if (!runConnSelect) {
+            if (!runTablesLoaded) loadRunTables();
+            return;
+        }
+        const all = runTargetIsAll();
+        runTablesSection.style.display = all ? 'none' : 'flex';
+        const hint = document.getElementById('run-target-hint');
+        if (hint) hint.style.display = all ? '' : 'none';
+        if (!all && !runTablesLoaded) loadRunTables(runConnSelect.value);
+    }
+
+    if (runConnSelect) {
+        runConnSelect.addEventListener('change', () => {
+            runTablesLoaded = false;
+            runTablesData = [];
+            syncRunTargetUi();
+        });
+    }
+
+    /* ---------- Searchable database dropdowns ----------
+       Wraps a native <select> in a button + search panel. The select stays
+       in the DOM (hidden) so form submission and change listeners keep
+       working untouched. Only used for the connection selects, which are
+       rendered exclusively when more than one database is configured. */
+    function enhanceSearchableSelect(sel) {
+        if (!sel || sel.dataset.bsEnhanced) return;
+        sel.dataset.bsEnhanced = '1';
+
+        const wrap = document.createElement('div');
+        wrap.className = 'bs-combo';
+        sel.parentNode.insertBefore(wrap, sel);
+        wrap.appendChild(sel);
+        sel.style.display = 'none';
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'bs-combo-btn';
+        if (sel.title) btn.title = sel.title;
+        wrap.appendChild(btn);
+
+        const panel = document.createElement('div');
+        panel.className = 'bs-combo-panel';
+        panel.innerHTML = '<input type="text" class="bs-combo-search" placeholder="Search database…">'
+            + '<div class="bs-combo-list"></div>';
+        wrap.appendChild(panel);
+
+        const search = panel.querySelector('.bs-combo-search');
+        const listEl = panel.querySelector('.bs-combo-list');
+
+        const syncBtn = () => {
+            btn.textContent = sel.options[sel.selectedIndex]?.text || '';
+        };
+        syncBtn();
+
+        function renderList(q) {
+            const needle = (q || '').trim().toLowerCase();
+            let html = '';
+            Array.from(sel.options).forEach(o => {
+                if (needle && !(o.text + ' ' + o.value).toLowerCase().includes(needle)) return;
+                html += '<div class="bs-combo-opt' + (o.value === sel.value ? ' active' : '') + '" data-value="'
+                    + escapeHtml(o.value) + '">' + escapeHtml(o.text) + '</div>';
+            });
+            listEl.innerHTML = html || '<div class="bs-combo-empty">No matching database</div>';
+        }
+
+        function openPanel() {
+            panel.classList.add('open');
+            search.value = '';
+            renderList('');
+            setTimeout(() => search.focus(), 0);
+        }
+        function closePanel() { panel.classList.remove('open'); }
+
+        btn.addEventListener('click', () => {
+            panel.classList.contains('open') ? closePanel() : openPanel();
+        });
+        search.addEventListener('input', () => renderList(search.value));
+        search.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                const first = listEl.querySelector('.bs-combo-opt');
+                if (first) pick(first.dataset.value);
+            } else if (e.key === 'Escape') {
+                closePanel();
+                btn.focus();
+            }
+        });
+        listEl.addEventListener('click', (e) => {
+            const opt = e.target.closest('.bs-combo-opt');
+            if (opt) pick(opt.dataset.value);
+        });
+
+        function pick(value) {
+            if (sel.value !== value) {
+                sel.value = value;
+                sel.dispatchEvent(new Event('change'));
+            }
+            syncBtn();
+            closePanel();
+        }
+
+        document.addEventListener('click', (e) => {
+            if (!wrap.contains(e.target)) closePanel();
+        });
+    }
+
+    // Deep-link from the Config page: /backup-station?run=<connection>
+    // preselects that database and opens the Run Backup dialog. The value
+    // is set BEFORE the combo enhancement so its button label is correct.
+    const bsRunParam = new URLSearchParams(window.location.search).get('run');
+    if (bsRunParam !== null && runConnSelect
+        && Array.from(runConnSelect.options).some(o => o.value === bsRunParam)) {
+        runConnSelect.value = bsRunParam;
+    }
+
+    enhanceSearchableSelect(document.querySelector('#filter-form select[name="connection"]'));
+    enhanceSearchableSelect(runConnSelect);
+
+    if (bsRunParam !== null) {
+        openRunDialog();
+    }
+
     function openRunDialog() {
         runModal.classList.add('open');
-        if (!runTablesLoaded) loadRunTables();
+        syncRunTargetUi();
     }
     function closeRunDialog() { runModal.classList.remove('open'); }
     runModal.addEventListener('click', (e) => {
@@ -484,9 +679,11 @@
     let runTablesData = [];                              // raw rows from API
     let runSort = { key: 'name', dir: 'asc' };           // active sort state
 
-    function loadRunTables() {
+    function loadRunTables(conn) {
         const list = document.getElementById('run-tables-list');
-        fetch('{{ route('backup-station.tables') }}', { credentials: 'same-origin' })
+        list.innerHTML = '<div class="muted" style="text-align:center;padding:30px">Loading tables…</div>';
+        const url = '{{ route('backup-station.tables') }}' + (conn ? ('?connection=' + encodeURIComponent(conn)) : '');
+        fetch(url, { credentials: 'same-origin' })
             .then(r => r.json())
             .then(data => {
                 if (data.error) {
@@ -558,6 +755,14 @@
     // Avoids PHP's max_input_vars (default 1000) silently dropping tables
     // when the database has many tables (e.g. 500+ → 1000+ inputs).
     function serializeRunSelection() {
+        // "All databases" target (or tables not loaded yet) ⇒ submit no table
+        // selection so every database gets a plain full dump.
+        if (runTargetIsAll() || !runTablesLoaded) {
+            document.getElementById('run-structure-json').value = '';
+            document.getElementById('run-data-json').value = '';
+            return true;
+        }
+
         const structure = [];
         const data = [];
         document.querySelectorAll('.run-table-row').forEach(tr => {

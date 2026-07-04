@@ -25,8 +25,6 @@ class BackupStationServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        $this->guardAgainstPublicDisk();
-
         $this->publishes([
             __DIR__ . '/../config/backup-station.php' => config_path('backup-station.php'),
         ], 'backup-station-config');
@@ -38,7 +36,14 @@ class BackupStationServiceProvider extends ServiceProvider
         $this->loadViewsFrom(__DIR__ . '/../resources/views', 'backup-station');
 
         if ($this->isEnabledForEnvironment() && config('backup-station.viewer.enabled', true)) {
-            $this->registerRoutes();
+            $this->registerRouteMiddleware();
+
+            // Hosts with custom routing needs (e.g. multi-tenant apps that
+            // register the dashboard per domain group) set register_routes
+            // to false and load routes/web.php themselves.
+            if (config('backup-station.viewer.register_routes', true)) {
+                $this->loadRoutesFrom(__DIR__ . '/../routes/web.php');
+            }
         }
 
         if ($this->app->runningInConsole()) {
@@ -63,7 +68,7 @@ class BackupStationServiceProvider extends ServiceProvider
         return (bool) config('backup-station.enable_production', true);
     }
 
-    protected function registerRoutes(): void
+    protected function registerRouteMiddleware(): void
     {
         $router = $this->app['router'];
 
@@ -75,42 +80,6 @@ class BackupStationServiceProvider extends ServiceProvider
         // Custom file-based throttle so the package doesn't depend on the
         // user's cache driver (which may be broken during a fresh restore).
         $router->aliasMiddleware('bs.throttle', BackupStationThrottle::class);
-
-        $this->loadRoutesFrom(__DIR__ . '/../routes/web.php');
-    }
-
-    /**
-     * Refuse to boot if the configured (or default) storage disk is one of
-     * the publicly-served disks. Backups contain raw SQL — letting them be
-     * fetched anonymously over HTTP would leak the entire database.
-     */
-    protected function guardAgainstPublicDisk(): void
-    {
-        $configured = config('backup-station.storage.disk');
-        $disk = $configured ?: config('filesystems.default');
-
-        $forbidden = ['public'];
-
-        // Detect any disk whose driver is `local` AND root sits inside the
-        // public web folder (storage/app/public, public/, etc.).
-        $diskConfig = config("filesystems.disks.{$disk}", []);
-        if (($diskConfig['driver'] ?? null) === 'local') {
-            $root = (string) ($diskConfig['root'] ?? '');
-            $publicRoots = [storage_path('app/public'), public_path()];
-            foreach ($publicRoots as $pr) {
-                if ($pr && str_starts_with($root, rtrim($pr, '/'))) {
-                    $forbidden[] = $disk;
-                    break;
-                }
-            }
-        }
-
-        if (in_array($disk, $forbidden, true)) {
-            throw new \RuntimeException(
-                "[backup-station] Refusing to use storage disk [{$disk}] — it is publicly accessible. "
-                . "Set BACKUP_STATION_DISK to a private disk (e.g. 'local', 's3') in your .env."
-            );
-        }
     }
 
     protected function registerSchedules(): void

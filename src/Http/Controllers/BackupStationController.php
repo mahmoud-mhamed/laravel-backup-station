@@ -61,12 +61,16 @@ class BackupStationController extends Controller
         $pinned = $request->query('pinned');                // all | pinned | unpinned
         $from = trim((string) $request->query('from', '')); // Y-m-d
         $to = trim((string) $request->query('to', ''));     // Y-m-d
+        $connection = trim((string) $request->query('connection', ''));
 
         $fromTs = $from !== '' ? strtotime($from . ' 00:00:00') : null;
         $toTs = $to !== '' ? strtotime($to . ' 23:59:59') : null;
 
-        $filtered = array_filter($entries, function ($e) use ($status, $search, $pinned, $fromTs, $toTs) {
+        $filtered = array_filter($entries, function ($e) use ($status, $search, $pinned, $fromTs, $toTs, $connection) {
             if ($status && $status !== 'all' && ($e['status'] ?? null) !== $status) {
+                return false;
+            }
+            if ($connection !== '' && ($e['connection'] ?? '') !== $connection) {
                 return false;
             }
             if ($search !== '') {
@@ -124,7 +128,9 @@ class BackupStationController extends Controller
 
         return view('backup-station::dashboard', [
             'paginator' => $paginator,
-            'stats' => $this->service->stats(),
+            // Cards mirror the active filters — stats are computed over the
+            // filtered entries, and DB size follows the connection filter.
+            'stats' => $this->service->stats(array_values($filtered)),
             'service' => $this->service,
             'status' => $status,
             'search' => $search,
@@ -132,13 +138,29 @@ class BackupStationController extends Controller
             'pinned' => $pinned,
             'from' => $from,
             'to' => $to,
-            'dbSize' => $this->service->databaseSize(),
+            'connection' => $connection,
+            'dbSize' => $this->service->databaseSize($connection !== '' ? $connection : null),
+            // Without a connection filter on a multi-database setup, the
+            // card shows the combined size of every database in scope.
+            'dbSizeSummary' => ($connection === '' && count($this->service->allBackupConnections()) > 1)
+                ? $this->service->databasesSizeSummary()
+                : null,
+            'connectionLabels' => $this->service->connectionLabels(),
         ]);
     }
 
     public function run(Request $request)
     {
         $note = $request->input('note');
+
+        // Optional backup target — empty means every connection in scope.
+        // Explicit targets may be any configured connection, even one
+        // excluded from full runs.
+        $connection = trim((string) $request->input('connection', ''));
+        if ($connection !== '' && !in_array($connection, $this->service->allBackupConnections(), true)) {
+            return back()->with('flash_error', "Unknown backup target [{$connection}].");
+        }
+        $connection = $connection !== '' ? $connection : null;
 
         $clean = function ($v) {
             if (!is_array($v)) return null;
@@ -179,12 +201,12 @@ class BackupStationController extends Controller
         }
 
         if (config('backup-station.queue.enabled')) {
-            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch(null, $note ?: null, $overrides);
+            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch($connection, $note ?: null, $overrides);
             return back()->with('flash', 'Backup queued — it will run in the background.');
         }
 
         try {
-            $created = $this->service->runBackup(null, $note ?: null, $overrides);
+            $created = $this->service->runBackup($connection, $note ?: null, $overrides);
             return back()->with('flash', count($created) . ' backup(s) created.');
         } catch (Throwable $e) {
             return back()->with('flash_error', 'Backup failed: ' . $e->getMessage());
@@ -354,7 +376,118 @@ class BackupStationController extends Controller
 
     public function config()
     {
-        return view('backup-station::config', ['config' => config('backup-station')]);
+        return view('backup-station::config', [
+            'config' => config('backup-station'),
+            'resolvedConnections' => $this->service->allBackupConnections(),
+            'effectiveConnections' => $this->service->backupConnections(),
+            'backupScope' => $this->service->loadBackupSettings(),
+            'backupScopeSource' => $this->service->scopeSource(),
+        ]);
+    }
+
+    public function databases()
+    {
+        $connections = $this->service->allBackupConnections();
+        $labels = $this->service->connectionLabels();
+        $settings = $this->service->loadBackupSettings();
+        $effective = $this->service->backupConnections();
+
+        // Latest successful backup per connection, for coverage insight.
+        $lastBackups = [];
+        foreach ($this->service->loadMetadata() as $e) {
+            if (($e['status'] ?? null) !== 'success' || ($e['type'] ?? null) === 'restore') {
+                continue;
+            }
+            $conn = $e['connection'] ?? null;
+            if (!$conn) {
+                continue;
+            }
+            if (!isset($lastBackups[$conn]) || strcmp($e['created_at'] ?? '', $lastBackups[$conn]['created_at'] ?? '') > 0) {
+                $lastBackups[$conn] = $e;
+            }
+        }
+
+        $connectionsInfo = [];
+        foreach ($connections as $conn) {
+            $size = $this->service->databaseSize($conn);
+            $connectionsInfo[] = [
+                'connection' => $conn,
+                'label' => $labels[$conn] ?? $conn,
+                'database' => $size['database'],
+                'driver' => $size['driver'],
+                'size' => (int) $size['size'],
+                'tables' => $size['tables'] ?? null,
+                'ok' => (bool) ($size['ok'] ?? true),
+                'last_backup' => $lastBackups[$conn] ?? null,
+                'in_backup' => in_array($conn, $effective, true),
+                'excluded' => in_array($conn, $settings['exclude'], true),
+            ];
+        }
+
+        return view('backup-station::databases', [
+            'connectionsInfo' => $connectionsInfo,
+            'service' => $this->service,
+            'scope' => $settings,
+            'scopeSource' => $this->service->scopeSource(),
+            'labels' => $labels,
+        ]);
+    }
+
+    /**
+     * Include/exclude one connection from full backup runs.
+     */
+    public function toggleConnection(Request $request)
+    {
+        if ($this->service->scopeSource() === 'config') {
+            return back()->with('flash_error', 'Auto-backup scope is managed from config/backup-station.php (scope.source=config) — edit the scope arrays there.');
+        }
+
+        $conn = trim((string) $request->input('connection', ''));
+        if (!in_array($conn, $this->service->allBackupConnections(), true)) {
+            return back()->with('flash_error', "Unknown connection [{$conn}].");
+        }
+
+        $settings = $this->service->loadBackupSettings();
+        if (in_array($conn, $settings['exclude'], true)) {
+            $settings['exclude'] = array_values(array_diff($settings['exclude'], [$conn]));
+            $flash = "[{$conn}] is included in backups again.";
+        } else {
+            $settings['exclude'][] = $conn;
+            $flash = "[{$conn}] is now excluded from backups.";
+        }
+        $this->service->saveBackupSettings($settings);
+
+        return back()->with('flash', $flash);
+    }
+
+    /**
+     * Restrict full backup runs to a single connection, or clear the
+     * restriction when no connection is given.
+     */
+    public function restrictConnection(Request $request)
+    {
+        if ($this->service->scopeSource() === 'config') {
+            return back()->with('flash_error', 'Auto-backup scope is managed from config/backup-station.php (scope.source=config) — edit the scope arrays there.');
+        }
+
+        $conn = trim((string) $request->input('connection', ''));
+        $settings = $this->service->loadBackupSettings();
+
+        if ($conn === '') {
+            $settings['mode'] = 'all';
+            $settings['only'] = [];
+            $flash = 'Backup restriction cleared — full runs cover all databases again.';
+        } else {
+            if (!in_array($conn, $this->service->allBackupConnections(), true)) {
+                return back()->with('flash_error', "Unknown connection [{$conn}].");
+            }
+            $settings['mode'] = 'only';
+            $settings['only'] = [$conn];
+            $flash = "Full backup runs are now restricted to [{$conn}] only.";
+        }
+        $this->service->saveBackupSettings($settings);
+
+        return back()->with('flash', $flash);
     }
 
     public function forecast(Request $request)

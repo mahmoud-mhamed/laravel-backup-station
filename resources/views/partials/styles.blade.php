@@ -50,8 +50,9 @@
     .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
     .card-pad { padding: 18px; }
 
-    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 18px; }
-    .stat { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .stat { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; min-width: 0; }
+    .stat .stat-filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .stat .label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
     .stat .value { font-size: 22px; font-weight: 700; margin-top: 4px; color: var(--text); }
     .stat .sub { font-size: 11px; color: var(--text-light); margin-top: 2px; }

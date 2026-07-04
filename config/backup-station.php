@@ -106,6 +106,54 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Dynamic Connections Provider
+    |--------------------------------------------------------------------------
+    |
+    | Class name implementing
+    | MahmoudMhamed\BackupStation\Contracts\BackupConnectionProvider.
+    |
+    | Use this when the set of databases to back up is dynamic — e.g. a
+    | multi-tenant application where each tenant has its own database that
+    | is not declared in config/database.php. The provider returns the
+    | connection names for a full run (connections()) and resolves the DB
+    | config for names Laravel doesn't know about (configFor()).
+    |
+    | When set, it takes precedence over the static `connections` list above.
+    |
+    */
+    'connections_provider' => null,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Automatic Backup Scope
+    |--------------------------------------------------------------------------
+    |
+    | Controls which databases AUTOMATIC (scheduled) runs cover. Manual runs
+    | from the dashboard always ignore this scope.
+    |
+    | source:
+    |   'ui'     — managed from the dashboard Databases page; stored in
+    |              settings.json on the storage disk. The arrays below are
+    |              ignored. (default)
+    |   'config' — managed here; the dashboard toggles are disabled and the
+    |              arrays below are authoritative.
+    |
+    | only:    when non-empty, automatic runs cover ONLY these connections.
+    | exclude: otherwise, these connections are skipped on automatic runs.
+    |
+    */
+    'scope' => [
+        'source' => env('BACKUP_STATION_SCOPE_SOURCE', 'ui'),
+        'only' => [
+            // 'tenant_abc',
+        ],
+        'exclude' => [
+            // 'tenant_xyz',
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Backup Storage
     |--------------------------------------------------------------------------
     |
@@ -548,6 +596,11 @@ return [
 
         // Enable or disable the dashboard routes
         'enabled' => env('BACKUP_STATION_VIEWER_ENABLED', true),
+
+        // When false, the package registers the middleware group but does NOT
+        // load its routes — the host app loads routes/web.php itself, e.g.
+        // once per domain group in a multi-tenant app.
+        'register_routes' => true,
 
         // Simple password protection. Set to null to disable.
         'password' => env('BACKUP_STATION_PASSWORD', null),

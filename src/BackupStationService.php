@@ -32,6 +32,66 @@ class BackupStationService
     }
 
     /**
+     * Existence check tolerant of S3-compatible backends that reject a HEAD
+     * request on an existing object — e.g. Garage behind Cloudflare answers a
+     * signed HEAD with 403, which Flysystem turns into UnableToCheckFileExistence.
+     * Laravel's exists()/fileExists() call the driver directly and ignore the
+     * disk `throw` flag, so that would otherwise abort listing, download and
+     * delete. On any failure we fall back to a directory LISTING, which these
+     * same backends serve without issue.
+     */
+    protected function diskFileExists(string $path): bool
+    {
+        $disk = $this->disk();
+
+        try {
+            return $disk->exists($path);
+        } catch (Throwable) {
+            try {
+                return in_array($path, $disk->files(self::dirname($path)), true);
+            } catch (Throwable) {
+                return false;
+            }
+        }
+    }
+
+    /**
+     * File size tolerant of the same HEAD-hostile backends: tries the driver's
+     * size() (a HEAD request), then falls back to the size reported by a
+     * directory LISTING. Returns null when the size cannot be determined.
+     */
+    protected function diskFileSize(string $path): ?int
+    {
+        $disk = $this->disk();
+
+        try {
+            return (int) $disk->size($path);
+        } catch (Throwable) {
+            try {
+                foreach ($disk->listContents(self::dirname($path), false) as $item) {
+                    if ($item->isFile() && $item->path() === $path) {
+                        $size = $item->fileSize();
+
+                        return $size === null ? null : (int) $size;
+                    }
+                }
+            } catch (Throwable) {
+                // fall through
+            }
+
+            return null;
+        }
+    }
+
+    /** Directory portion of a disk-relative path ('' for a root-level file). */
+    protected static function dirname(string $path): string
+    {
+        $dir = trim(str_replace('\\', '/', \dirname($path)), '/');
+
+        return $dir === '.' ? '' : $dir;
+    }
+
+    /**
      * Whether the current disk is a remote/network filesystem where
      * per-file existence checks are expensive (each one is a HEAD request).
      */
@@ -211,7 +271,7 @@ class BackupStationService
 
         try {
             $disk = $this->disk();
-            if (!$disk->exists($this->settingsPath())) {
+            if (!$this->diskFileExists($this->settingsPath())) {
                 return $defaults;
             }
             $data = json_decode($disk->get($this->settingsPath()) ?: '[]', true);
@@ -818,14 +878,12 @@ class BackupStationService
 
     public function fileExists(string $filename): bool
     {
-        return $this->disk()->exists($this->pathFor($filename));
+        return $this->diskFileExists($this->pathFor($filename));
     }
 
     public function size(string $filename): int
     {
-        return $this->fileExists($filename)
-            ? (int) $this->disk()->size($this->pathFor($filename))
-            : 0;
+        return $this->diskFileSize($this->pathFor($filename)) ?? 0;
     }
 
     public function deleteFile(string $filename): void
@@ -847,7 +905,18 @@ class BackupStationService
             throw new RuntimeException('Backup file not found.');
         }
 
-        return $this->disk()->download($this->pathFor($filename), $filename);
+        $path = $this->pathFor($filename);
+
+        // Provide Content-Length explicitly so Laravel's download() does not
+        // issue its own size() HEAD request, which some S3 backends (e.g. Garage
+        // behind Cloudflare) answer with 403.
+        $headers = [];
+        $size = $this->diskFileSize($path);
+        if ($size !== null) {
+            $headers['Content-Length'] = (string) $size;
+        }
+
+        return $this->disk()->download($path, $filename, $headers);
     }
 
     /* -------------------------------------------------------------------- */
@@ -1281,7 +1350,7 @@ class BackupStationService
         $disk = $this->disk();
         $path = $this->metadataPath();
 
-        if (!$disk->exists($path)) {
+        if (!$this->diskFileExists($path)) {
             return $this->metadataCache = [];
         }
 

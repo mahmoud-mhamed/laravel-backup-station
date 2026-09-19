@@ -39,6 +39,7 @@ Route::group([
         Route::post('/delete', [BackupStationController::class, 'delete'])->name('backup-station.delete');
         Route::post('/delete-multiple', [BackupStationController::class, 'deleteMultiple'])->name('backup-station.delete-multiple');
         Route::post('/rename', [BackupStationController::class, 'rename'])->name('backup-station.rename');
+        Route::post('/note', [BackupStationController::class, 'updateNote'])->name('backup-station.note');
         Route::post('/pin', [BackupStationController::class, 'pin'])->name('backup-station.pin');
         Route::post('/cleanup', [BackupStationController::class, 'cleanup'])->name('backup-station.cleanup');
         Route::post('/databases/toggle', [BackupStationController::class, 'toggleConnection'])->name('backup-station.databases.toggle');

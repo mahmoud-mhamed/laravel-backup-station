@@ -111,6 +111,10 @@
     .modal label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; }
     .modal input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 13px; outline: none; }
     .modal input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+    .modal textarea { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); font-size: 13px; outline: none; font-family: inherit; resize: vertical; min-height: 80px; }
+    .modal textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-glow); }
+    .bk-note { cursor: pointer; }
+    .bk-note:hover { color: var(--primary); text-decoration: underline dotted; }
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 
     .pin { color: var(--warning-text); cursor: pointer; }

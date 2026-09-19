@@ -111,6 +111,16 @@
                     <label class="muted" style="font-size:12px;">To
                         <input type="date" name="to" value="{{ $to }}" />
                     </label>
+                    @php
+                        $bsToday = now()->toDateString();
+                        $bsYesterday = now()->subDay()->toDateString();
+                    @endphp
+                    <span class="filter-group">
+                        <button type="button" class="filter-pill js-date-preset {{ ($from === $bsToday && $to === $bsToday) ? 'active' : '' }}"
+                                data-date="{{ $bsToday }}" title="Backups created today">Today</button>
+                        <button type="button" class="filter-pill js-date-preset {{ ($from === $bsYesterday && $to === $bsYesterday) ? 'active' : '' }}"
+                                data-date="{{ $bsYesterday }}" title="Backups created yesterday">Yesterday</button>
+                    </span>
                     @if(count($connectionLabels ?? []) > 1)
                         <select name="connection" title="Filter by database">
                             <option value="">All databases</option>
@@ -203,7 +213,7 @@
                                 @if($isRestore)<span class="badge badge-info" style="margin-right:6px">↺ Restore</span>@endif
                                 {{ $b['filename'] ?? '—' }}
                             </div>
-                            @if(!empty($b['note']))<div class="muted">{{ $b['note'] }}</div>@endif
+                            @if(!empty($b['note']))<div class="muted bk-note js-note" data-id="{{ $id }}" data-note="{{ $b['note'] }}" title="Click to edit note">{{ $b['note'] }}</div>@endif
                             @if(!empty($b['monthly_keep']))<span class="badge badge-info" style="margin-top:4px">Monthly</span>@endif
                             @if(!$isRestore && !empty($b['encrypted']))
                                 <span class="badge badge-warning" style="margin-top:4px" title="AES-256 password protected">🔒 Encrypted</span>
@@ -299,6 +309,11 @@
                                     <button type="button" class="btn btn-sm btn-danger js-view-error"
                                             data-error="{{ $b['error'] }}">View error</button>
                                 @endif
+
+                                <button type="button" class="btn btn-sm js-note"
+                                        data-id="{{ $id }}"
+                                        data-note="{{ $b['note'] ?? '' }}"
+                                        title="{{ empty($b['note']) ? 'Add a note' : 'Edit note' }}">✎ Note</button>
 
                                 @if(config('backup-station.allow_delete', true))
                                     <form method="POST" action="{{ route('backup-station.delete') }}" style="display:inline" id="del-form-{{ $id }}">
@@ -513,6 +528,20 @@
     </form>
 </div>
 
+<div class="modal-backdrop" id="note-modal">
+    <form method="POST" action="{{ route('backup-station.note') }}" class="modal">
+        @csrf
+        <h3>Edit Note</h3>
+        <input type="hidden" name="id" id="note-id">
+        <label for="note-text">Note (leave empty to remove)</label>
+        <textarea name="note" id="note-text" maxlength="500" rows="3" placeholder="e.g. Pre-deploy snapshot"></textarea>
+        <div class="modal-actions">
+            <button type="button" class="btn" onclick="closeNote()">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+    </form>
+</div>
+
 <script>
     function showError(text) {
         document.getElementById('error-text').textContent = text || '(no details)';
@@ -558,6 +587,20 @@
     }
     document.getElementById('rename-modal').addEventListener('click', (e) => {
         if (e.target.id === 'rename-modal') closeRename();
+    });
+
+    function openNote(id, current) {
+        document.getElementById('note-id').value = id;
+        document.getElementById('note-text').value = current || '';
+        document.getElementById('note-modal').classList.add('open');
+        setTimeout(() => document.getElementById('note-text').focus(), 50);
+    }
+    function closeNote() { document.getElementById('note-modal').classList.remove('open'); }
+    document.getElementById('note-modal').addEventListener('click', (e) => {
+        if (e.target.id === 'note-modal') closeNote();
+    });
+    document.querySelectorAll('.js-note').forEach(el => {
+        el.addEventListener('click', () => openNote(el.dataset.id, el.dataset.note));
     });
 
     // Bind row action buttons via data-* attributes (avoids inline onclick escaping issues).
@@ -1055,11 +1098,21 @@
         });
     });
 
-    document.querySelectorAll('.filter-pill').forEach(btn => {
+    document.querySelectorAll('.filter-pill[data-field]').forEach(btn => {
         btn.addEventListener('click', () => {
             const field = document.getElementById(btn.dataset.field);
             if (field) field.value = btn.dataset.value;
             document.getElementById('filter-form').submit();
+        });
+    });
+
+    // Today / Yesterday presets — set both date bounds to the same day.
+    document.querySelectorAll('.js-date-preset').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const form = document.getElementById('filter-form');
+            form.querySelector('[name=from]').value = btn.dataset.date;
+            form.querySelector('[name=to]').value = btn.dataset.date;
+            form.submit();
         });
     });
 

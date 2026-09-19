@@ -14,7 +14,7 @@ Automatic database backups for Laravel — schedule, retention rules, monthly sn
 - 🐬 **Multi-driver** — MySQL/MariaDB, PostgreSQL, SQLite
 - 🗜️ **ZIP / Gzip / Plain** — backups default to `.sql.zip` (opens with any tool); switch to `.sql.gz` or plain `.sql` via `BACKUP_STATION_ARCHIVE`
 - ⬇️ **Download** any backup with one click, or **Download Multiple** — tick several rows (or select all) and get them as a single ZIP
-- ✏️ **Rename** backups in place (extension preserved)
+- ✏️ **Rename** backups in place (extension preserved) and **edit the note** on any entry
 - 🔍 **Search & filter** by filename, database, status
 - 🌑 **Dark mode** with persistent preference
 - 🔒 **Password protection** + authorize callback for the dashboard

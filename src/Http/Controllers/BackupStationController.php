@@ -346,6 +346,18 @@ class BackupStationController extends Controller
         }
     }
 
+    public function updateNote(Request $request)
+    {
+        $request->validate(['id' => 'required|string', 'note' => 'nullable|string|max:500']);
+
+        $note = trim((string) $request->input('note', ''));
+        $updated = $this->service->updateEntry($request->input('id'), ['note' => $note !== '' ? $note : null]);
+        if (!$updated) {
+            return back()->with('flash_error', 'Backup not found.');
+        }
+        return back()->with('flash', $note !== '' ? 'Note updated.' : 'Note removed.');
+    }
+
     public function pin(Request $request)
     {
         $this->service->togglePin($request->input('id'));

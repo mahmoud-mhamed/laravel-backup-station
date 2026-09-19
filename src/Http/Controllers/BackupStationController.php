@@ -283,6 +283,38 @@ class BackupStationController extends Controller
         }
     }
 
+    public function downloadMultiple(Request $request)
+    {
+        $required = (string) config('backup-station.download_password', '');
+        if ($required !== '' && !$this->confirmationOk($required, $request->input('download_password'))) {
+            return back()->with('flash_error', 'Invalid download password.');
+        }
+
+        $ids = array_values(array_unique(array_filter((array) $request->input('ids', []), 'is_string')));
+        $entries = [];
+        foreach ($ids as $id) {
+            $entry = $this->service->findById($id);
+            if ($entry && ($entry['status'] ?? null) === 'success' && ($entry['type'] ?? null) !== 'restore') {
+                $entries[] = $entry;
+            }
+        }
+
+        if (empty($entries)) {
+            return back()->with('flash_error', 'No downloadable backups selected.');
+        }
+
+        // See download(): stray output buffers would corrupt the archive.
+        while (ob_get_level() > 0) {
+            ob_end_clean();
+        }
+
+        try {
+            return $this->service->downloadBundleResponse($entries);
+        } catch (Throwable $e) {
+            return back()->with('flash_error', 'Bundle failed: ' . $e->getMessage());
+        }
+    }
+
     public function delete(Request $request)
     {
         abort_unless((bool) config('backup-station.allow_delete', true), 403, 'Delete is disabled.');

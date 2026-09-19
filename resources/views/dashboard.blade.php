@@ -97,6 +97,8 @@
                     <button class="btn" type="button" onclick="openImport()" title="Upload an existing backup file">⬆ Import Backup</button>
                 @endif
 
+                <button class="btn" type="button" id="bs-select-toggle" title="Select several backups and download them as one ZIP">⬇ Download Multiple</button>
+
                 @php $curStatus = $status ?: 'all'; $curPinned = $pinned ?: 'all'; @endphp
 
                 <form method="GET" id="filter-form" style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
@@ -145,9 +147,26 @@
                 </div>
             </div>
 
+            <div class="bs-select-bar" id="bs-select-bar">
+                <label class="bs-select-all-label">
+                    <input type="checkbox" id="bs-select-all"> Select all
+                </label>
+                <span class="muted"><strong id="bs-select-count">0</strong> selected</span>
+                <span style="margin-left:auto; display:flex; gap:8px;">
+                    <button type="button" class="btn btn-sm btn-success" id="bs-select-download" disabled>↓ Download Selected</button>
+                    <button type="button" class="btn btn-sm" id="bs-select-cancel">Cancel</button>
+                </span>
+            </div>
+            <form method="POST" action="{{ route('backup-station.download-multiple') }}" id="bulk-dl-form" style="display:none">
+                @csrf
+                <input type="hidden" name="download_password" value="" id="bulk-dl-pw">
+                <div id="bulk-dl-ids"></div>
+            </form>
+
             <table class="bk-table">
                 <thead>
                 <tr>
+                    <th class="bs-sel-col"></th>
                     <th style="width:36px"></th>
                     <th>Filename</th>
                     <th>Database</th>
@@ -159,8 +178,18 @@
                 </thead>
                 <tbody>
                 @forelse($paginator as $b)
-                    @php $id = $b['id']; @endphp
+                    @php
+                        $id = $b['id'];
+                        $bsDownloadable = ($b['status'] ?? null) === 'success'
+                            && ($b['type'] ?? null) !== 'restore'
+                            && ($b['_exists'] ?? true);
+                    @endphp
                     <tr>
+                        <td class="bs-sel-col">
+                            @if($bsDownloadable)
+                                <input type="checkbox" class="bs-row-cb" value="{{ $id }}" title="Select for download">
+                            @endif
+                        </td>
                         <td>
                             <form method="POST" action="{{ route('backup-station.pin') }}" style="display:inline">
                                 @csrf
@@ -285,7 +314,7 @@
                         </td>
                     </tr>
                 @empty
-                    <tr><td colspan="7" style="padding:30px; text-align:center; color:var(--text-muted)">No backups yet. Click <strong>Run Backup Now</strong> to create one.</td></tr>
+                    <tr><td colspan="8" style="padding:30px; text-align:center; color:var(--text-muted)">No backups yet. Click <strong>Run Backup Now</strong> to create one.</td></tr>
                 @endforelse
                 </tbody>
             </table>
@@ -387,6 +416,16 @@
 </div>
 
 <style>
+    .bs-sel-col { display:none; width:34px; text-align:center; padding-right:0 !important; }
+    body.bs-select-mode .bs-sel-col { display:table-cell; }
+    .bs-sel-col input { width:15px; height:15px; cursor:pointer; vertical-align:middle; }
+    .bs-select-bar { display:none; align-items:center; gap:14px; padding:10px 14px; border-bottom:1px solid var(--border); background:var(--bg); font-size:13px; }
+    body.bs-select-mode .bs-select-bar { display:flex; }
+    body.bs-select-mode #bs-select-toggle { display:none; }
+    .bs-select-all-label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+    .bs-select-all-label input { width:15px; height:15px; cursor:pointer; }
+    body.bs-select-mode tr.bs-row-selected td { background:var(--primary-glow); }
+
     .run-tbl-table { width:100%; border-collapse:collapse; font-size:12.5px; }
     .run-tbl-table th { position:sticky; top:0; background:var(--bg-card); padding:8px 12px; text-align:left; border-bottom:1px solid var(--border); font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color:var(--text-muted); font-weight:600; z-index:1; }
     .run-tbl-table th input { vertical-align:middle; }
@@ -890,6 +929,72 @@
     }
 
     document.getElementById('run-table-search').addEventListener('input', applyRunFilter);
+
+    // ---- Multi-select download ----------------------------------------
+    (function () {
+        const toggleBtn = document.getElementById('bs-select-toggle');
+        const selectAll = document.getElementById('bs-select-all');
+        const countEl = document.getElementById('bs-select-count');
+        const dlBtn = document.getElementById('bs-select-download');
+        const cancelBtn = document.getElementById('bs-select-cancel');
+        const rowCbs = Array.from(document.querySelectorAll('.bs-row-cb'));
+        const needsPw = {{ config('backup-station.download_password') ? 'true' : 'false' }};
+
+        if (!toggleBtn) return;
+
+        function checked() { return rowCbs.filter(cb => cb.checked); }
+
+        function refresh() {
+            const n = checked().length;
+            countEl.textContent = n;
+            dlBtn.disabled = n === 0;
+            dlBtn.textContent = '↓ Download Selected' + (n ? ' (' + n + ')' : '');
+            selectAll.checked = rowCbs.length > 0 && n === rowCbs.length;
+            selectAll.indeterminate = n > 0 && n < rowCbs.length;
+            rowCbs.forEach(cb => cb.closest('tr').classList.toggle('bs-row-selected', cb.checked));
+        }
+
+        function setMode(on) {
+            document.body.classList.toggle('bs-select-mode', on);
+            if (!on) {
+                rowCbs.forEach(cb => cb.checked = false);
+                refresh();
+            }
+        }
+
+        toggleBtn.addEventListener('click', () => setMode(true));
+        cancelBtn.addEventListener('click', () => setMode(false));
+
+        selectAll.addEventListener('change', () => {
+            rowCbs.forEach(cb => cb.checked = selectAll.checked);
+            refresh();
+        });
+        rowCbs.forEach(cb => cb.addEventListener('change', refresh));
+
+        dlBtn.addEventListener('click', () => {
+            const ids = checked().map(cb => cb.value);
+            if (!ids.length) return;
+
+            if (needsPw) {
+                const pw = window.prompt('Enter the download password:');
+                if (pw === null || pw === '') return;
+                document.getElementById('bulk-dl-pw').value = pw;
+            }
+
+            const holder = document.getElementById('bulk-dl-ids');
+            holder.innerHTML = '';
+            ids.forEach(id => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'ids[]';
+                input.value = id;
+                holder.appendChild(input);
+            });
+            document.getElementById('bulk-dl-form').submit();
+        });
+
+        refresh();
+    })();
 
     document.querySelectorAll('.js-download').forEach(btn => {
         btn.addEventListener('click', () => {

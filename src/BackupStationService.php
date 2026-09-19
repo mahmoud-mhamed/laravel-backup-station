@@ -919,6 +919,93 @@ class BackupStationService
         return $this->disk()->download($path, $filename, $headers);
     }
 
+    /**
+     * Bundle several backups into one ZIP and return it as a download.
+     *
+     * Each file is staged from the storage disk into a local temp file
+     * (works for local and remote disks alike), then added to the archive
+     * with STORE compression — the backups are already gzip/zip compressed,
+     * so deflating them again would only burn CPU. The archive and staged
+     * files are removed once the response has been sent.
+     */
+    public function downloadBundleResponse(array $entries): \Symfony\Component\HttpFoundation\BinaryFileResponse
+    {
+        if (!class_exists(\ZipArchive::class)) {
+            throw new RuntimeException('PHP zip extension is required for multi-file download.');
+        }
+
+        $bundleName = 'backups-' . now()->format('Ymd-His') . '.zip';
+        $zipPath = $this->newTempPath($bundleName);
+        $staged = [];
+
+        try {
+            $zip = new \ZipArchive();
+            $rc = $zip->open($zipPath, \ZipArchive::CREATE | \ZipArchive::OVERWRITE);
+            if ($rc !== true) {
+                throw new RuntimeException("Cannot create archive (libzip error {$rc}).");
+            }
+
+            $added = 0;
+            $usedNames = [];
+            foreach ($entries as $entry) {
+                $filename = $entry['filename'] ?? null;
+                if (!$filename || !$this->fileExists($filename)) {
+                    continue;
+                }
+
+                $stagedPath = $this->newTempPath($filename);
+                $stream = $this->disk()->readStream($this->pathFor($filename));
+                if (!is_resource($stream)) {
+                    continue;
+                }
+                $out = fopen($stagedPath, 'wb');
+                try {
+                    stream_copy_to_stream($stream, $out);
+                } finally {
+                    fclose($out);
+                    if (is_resource($stream)) fclose($stream);
+                }
+                $staged[] = $stagedPath;
+
+                // Guard against two entries sharing a filename.
+                $innerName = basename($filename);
+                if (isset($usedNames[$innerName])) {
+                    $innerName = substr((string) ($entry['id'] ?? uniqid()), 0, 8) . '_' . $innerName;
+                }
+                $usedNames[$innerName] = true;
+
+                if (!$zip->addFile($stagedPath, $innerName)) {
+                    throw new RuntimeException("Failed to add [{$innerName}] to archive.");
+                }
+                if (defined('ZipArchive::CM_STORE')) {
+                    @$zip->setCompressionName($innerName, \ZipArchive::CM_STORE);
+                }
+                $added++;
+            }
+
+            if ($added === 0) {
+                $zip->close();
+                throw new RuntimeException('None of the selected backup files exist on storage.');
+            }
+
+            if (!$zip->close()) {
+                throw new RuntimeException('Failed to write archive.');
+            }
+        } catch (Throwable $e) {
+            @unlink($zipPath);
+            throw $e;
+        } finally {
+            foreach ($staged as $f) {
+                @unlink($f);
+            }
+        }
+
+        return response()->download($zipPath, $bundleName, [
+            'Content-Type' => 'application/zip',
+            'Content-Length' => (string) filesize($zipPath),
+        ])->deleteFileAfterSend(true);
+    }
+
     /* -------------------------------------------------------------------- */
     /* Database dump implementations                                         */
     /* -------------------------------------------------------------------- */

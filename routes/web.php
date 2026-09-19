@@ -23,6 +23,9 @@ Route::group([
     Route::match(['GET', 'POST'], '/download/{id}', [BackupStationController::class, 'download'])
         ->middleware($actionThrottle)
         ->name('backup-station.download');
+    Route::post('/download-multiple', [BackupStationController::class, 'downloadMultiple'])
+        ->middleware($actionThrottle)
+        ->name('backup-station.download-multiple');
     Route::get('/config', [BackupStationController::class, 'config'])->name('backup-station.config');
     Route::get('/databases', [BackupStationController::class, 'databases'])->name('backup-station.databases');
     Route::get('/forecast', [BackupStationController::class, 'forecast'])->name('backup-station.forecast');

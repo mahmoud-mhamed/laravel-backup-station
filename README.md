@@ -13,7 +13,7 @@ Automatic database backups for Laravel — schedule, retention rules, monthly sn
 - ⚠ **Missing-file detection** — entries whose file no longer exists on the disk are flagged in the dashboard
 - 🐬 **Multi-driver** — MySQL/MariaDB, PostgreSQL, SQLite
 - 🗜️ **ZIP / Gzip / Plain** — backups default to `.sql.zip` (opens with any tool); switch to `.sql.gz` or plain `.sql` via `BACKUP_STATION_ARCHIVE`
-- ⬇️ **Download** any backup with one click
+- ⬇️ **Download** any backup with one click, or **Download Multiple** — tick several rows (or select all) and get them as a single ZIP
 - ✏️ **Rename** backups in place (extension preserved)
 - 🔍 **Search & filter** by filename, database, status
 - 🌑 **Dark mode** with persistent preference
@@ -227,6 +227,9 @@ The dashboard at `/backup-station` shows:
   size of every configured database, and the latest backup with the
   first-success date and coverage span
 - Full list with **Download**, **Rename**, **Pin**, **Delete** actions
+- **Download Multiple** — toggles a checkbox column with select-all; the
+  selected backups are bundled into one `backups-<timestamp>.zip`
+  (respects `BACKUP_STATION_DOWNLOAD_PASSWORD` when set)
 - "Run Backup Now" with a target selector — all databases or a single
   one (searchable dropdown, per-table structure/data picker)
 - Search, date range, status and database filters, per-page control

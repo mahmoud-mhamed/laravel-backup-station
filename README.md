@@ -251,7 +251,10 @@ The dashboard at `/backup-station` shows:
 - Stat cards that mirror the active filters: totals, success rate with
   average duration, sizes (total + average per backup), combined live
   size of every configured database, and the latest backup with the
-  first-success date and coverage span
+  first-success date and coverage span, plus a **Server Disk** card (free /
+  total space with a usage bar) — only for `local` storage disks; remote
+  disks such as S3 show "Not available". Hide it with
+  `viewer.show_server_disk_space => false`
 - Full list with **Download**, **Rename**, **🔒 Protect**, **Delete** actions.
   Protected backups (`"pinned": true` in `backups.json`) show a *🔒 Protected*
   badge, are never removed by the retention policy, and deleting one by hand

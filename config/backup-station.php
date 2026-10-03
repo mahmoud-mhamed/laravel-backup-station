@@ -610,6 +610,11 @@ return [
         // Simple password protection. Set to null to disable.
         'password' => env('BACKUP_STATION_PASSWORD', null),
 
+        // "Server Disk" stat card: free / total space of the filesystem that
+        // holds the backups. Only measurable when the storage disk uses the
+        // `local` driver — remote disks (s3, ftp, …) show "Not available".
+        'show_server_disk_space' => env('BACKUP_STATION_SHOW_SERVER_DISK_SPACE', true),
+
         // Rate-limit "<max-attempts>,<minutes>" applied to POST routes.
         // login    — brute-force protection on /login
         // action   — bound on /run, /import (general write actions)

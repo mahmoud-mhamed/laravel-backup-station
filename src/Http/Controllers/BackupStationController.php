@@ -161,6 +161,9 @@ class BackupStationController extends Controller
             'connectionLabels' => $this->service->connectionLabels(),
             // Databases the next automatic (scheduled) run will cover.
             'scheduledTargets' => $this->service->backupConnections(),
+            'serverDisk' => config('backup-station.viewer.show_server_disk_space', true)
+                ? $this->service->serverDiskSpace()
+                : null,
         ]);
     }
 

@@ -81,6 +81,26 @@
                     @endif
                 </div>
             </div>
+            @if(!empty($serverDisk))
+                @php
+                    $bsDiskPct = $serverDisk['used_percent'] ?? null;
+                    $bsDiskColor = $bsDiskPct === null ? 'var(--text-muted)'
+                        : ($bsDiskPct >= 90 ? 'var(--danger-text)' : ($bsDiskPct >= 75 ? 'var(--warning-text)' : 'var(--success-text)'));
+                @endphp
+                <div class="stat" style="border-left: 3px solid {{ $bsDiskColor }}">
+                    <div class="label">Server Disk</div>
+                    @if($serverDisk['available'])
+                        <div class="value" style="color: {{ $bsDiskColor }}">{{ $service->formatBytes($serverDisk['free']) }} <span style="font-size:12px;font-weight:500" class="muted">free</span></div>
+                        <div class="sub">of {{ $service->formatBytes($serverDisk['total']) }} total · {{ $bsDiskPct }}% used</div>
+                        <div style="height:6px;margin-top:8px;border-radius:3px;background:var(--border);overflow:hidden" title="{{ $service->formatBytes($serverDisk['used']) }} used">
+                            <div style="height:100%;width:{{ min(100, $bsDiskPct) }}%;background:{{ $bsDiskColor }}"></div>
+                        </div>
+                    @else
+                        <div class="value muted">—</div>
+                        <div class="sub">{{ $serverDisk['reason'] ?? 'Not available' }}</div>
+                    @endif
+                </div>
+            @endif
         </div>
 
         <div class="card">

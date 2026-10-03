@@ -2598,6 +2598,54 @@ class BackupStationService
         return round($bytes / (1024 ** $i), 2) . ' ' . $units[$i];
     }
 
+    /**
+     * Free / total space of the server filesystem holding the backups.
+     *
+     * Returns ['available' => false, 'reason' => …] instead of throwing:
+     * remote disks (s3, ftp, …) expose no capacity, and disk_free_space()
+     * may be disabled or blocked by open_basedir on some hosts.
+     *
+     * @return array{available:bool, reason?:string, free?:int, total?:int, used?:int, used_percent?:float}
+     */
+    public function serverDiskSpace(): array
+    {
+        try {
+            $driver = (string) config('filesystems.disks.' . $this->diskName() . '.driver', '');
+            if ($driver !== 'local') {
+                return ['available' => false, 'reason' => 'Not available for ' . ($driver ?: 'this') . ' disk'];
+            }
+
+            if (!function_exists('disk_free_space') || !function_exists('disk_total_space')) {
+                return ['available' => false, 'reason' => 'Disk functions are disabled on this server'];
+            }
+
+            // The backup folder may not exist yet — measure its nearest
+            // existing ancestor, which lives on the same filesystem.
+            $path = $this->disk()->path('');
+            while ($path !== '' && !@is_dir($path) && dirname($path) !== $path) {
+                $path = dirname($path);
+            }
+
+            $free = @disk_free_space($path);
+            $total = @disk_total_space($path);
+            if ($free === false || $total === false || $total <= 0) {
+                return ['available' => false, 'reason' => 'Could not read disk space'];
+            }
+
+            $used = max(0, $total - $free);
+
+            return [
+                'available' => true,
+                'free' => (int) $free,
+                'total' => (int) $total,
+                'used' => (int) $used,
+                'used_percent' => round($used / $total * 100, 1),
+            ];
+        } catch (Throwable $e) {
+            return ['available' => false, 'reason' => 'Could not read disk space'];
+        }
+    }
+
     public function totalSize(): int
     {
         return array_sum(array_map(fn ($e) => (int) ($e['size'] ?? 0), $this->loadMetadata()));

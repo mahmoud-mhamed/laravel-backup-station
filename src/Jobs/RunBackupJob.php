@@ -15,8 +15,13 @@ class RunBackupJob implements ShouldQueue
 
     public int $tries = 1;
 
+    /**
+     * @param string|null $targetConnection Database connection to back up (null = every connection in scope).
+     *                                      Not named `$connection`: that property belongs to Queueable
+     *                                      (the queue connection) and redeclaring it is a fatal error.
+     */
     public function __construct(
-        public ?string $connection = null,
+        public ?string $targetConnection = null,
         public ?string $note = null,
         public array $overrides = [],
         public bool $scheduled = false,
@@ -43,6 +48,6 @@ class RunBackupJob implements ShouldQueue
         ignore_user_abort(true);
         @set_time_limit(0);
 
-        $service->runBackup($this->connection, $this->note, $this->overrides, $this->scheduled);
+        $service->runBackup($this->targetConnection, $this->note, $this->overrides, $this->scheduled);
     }
 }

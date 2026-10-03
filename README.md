@@ -253,7 +253,7 @@ The dashboard at `/backup-station` shows:
   size of every configured database, and the latest backup with the
   first-success date and coverage span, plus a **Server Disk** card (free /
   total space with a usage bar) — only for `local` storage disks; remote
-  disks such as S3 show "Not available". Hide it with
+  disks such as S3 (or any read failure) hide the card. Hide it always with
   `viewer.show_server_disk_space => false`
 - Full list with **Download**, **Rename**, **🔒 Protect**, **Delete** actions.
   Protected backups (`"pinned": true` in `backups.json`) show a *🔒 Protected*

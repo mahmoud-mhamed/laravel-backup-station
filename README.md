@@ -13,7 +13,7 @@ Automatic database backups for Laravel — schedule, retention rules, monthly sn
 - ⚠ **Missing-file detection** — entries whose file no longer exists on the disk are flagged in the dashboard
 - 🐬 **Multi-driver** — MySQL/MariaDB, PostgreSQL, SQLite
 - 🗜️ **ZIP / Gzip / Plain** — backups default to `.sql.zip` (opens with any tool); switch to `.sql.gz` or plain `.sql` via `BACKUP_STATION_ARCHIVE`
-- ⬇️ **Download** any backup with one click, or **Download Multiple** — tick several rows (or select all) and get them as a single ZIP
+- ⬇️ **Download** any backup with one click, or **Select Multiple** — tick several rows (or select all) and download them as a single ZIP or delete them in one go
 - ✏️ **Rename** backups in place (extension preserved) and **edit the note** on any entry
 - 🔍 **Search & filter** by filename, database, status
 - 🌑 **Dark mode** with persistent preference
@@ -227,12 +227,16 @@ The dashboard at `/backup-station` shows:
   size of every configured database, and the latest backup with the
   first-success date and coverage span
 - Full list with **Download**, **Rename**, **Pin**, **Delete** actions
-- **Download Multiple** — toggles a checkbox column with select-all; the
+- **Select Multiple** — toggles a checkbox column with select-all; the
   selected backups are bundled into one `backups-<timestamp>.zip`
-  (respects `BACKUP_STATION_DOWNLOAD_PASSWORD` when set)
+  (respects `BACKUP_STATION_DOWNLOAD_PASSWORD` when set) or deleted together
+  (when `allow_delete` is on)
+- **Cleanup** applies the retention policy; tick "Delete all backups" in the
+  dialog to wipe every backup instead (pinned/monthly included)
 - "Run Backup Now" with a target selector — all databases or a single
   one (searchable dropdown, per-table structure/data picker)
-- Search, date range, status and database filters, per-page control
+- Search, date range (plus Today / Yesterday and a 🕒 "last 30 min / 1h /
+  3h / 6h / 12h" dropdown), status and database filters, per-page control
 - **Databases** page — one row per configured database with live size,
   tables count, reachability, last successful backup, auto-backup scope
   toggles and a **Backup now** shortcut (`/backup-station?run=<connection>`

@@ -91,19 +91,25 @@
                         @csrf
                         <button class="btn js-cleanup" type="button" title="Apply retention policy now">Cleanup</button>
                     </form>
+                    <form method="POST" action="{{ route('backup-station.clear-all') }}" id="clear-all-form" style="display:none" data-loading="Deleting all backups…">
+                        @csrf
+                    </form>
                 @endif
 
                 @if(config('backup-station.allow_import', false))
                     <button class="btn" type="button" onclick="openImport()" title="Upload an existing backup file">⬆ Import Backup</button>
                 @endif
 
-                <button class="btn" type="button" id="bs-select-toggle" title="Select several backups and download them as one ZIP">⬇ Download Multiple</button>
+                @php $bsCanDelete = (bool) config('backup-station.allow_delete', true); @endphp
+                <button class="btn" type="button" id="bs-select-toggle"
+                        title="{{ $bsCanDelete ? 'Select several backups to download as one ZIP or delete' : 'Select several backups and download them as one ZIP' }}">{{ $bsCanDelete ? '☑ Select Multiple' : '⬇ Download Multiple' }}</button>
 
                 @php $curStatus = $status ?: 'all'; $curPinned = $pinned ?: 'all'; @endphp
 
                 <form method="GET" id="filter-form" style="margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
                     <input type="hidden" name="status" id="f-status" value="{{ $curStatus }}">
                     <input type="hidden" name="pinned" id="f-pinned" value="{{ $curPinned }}">
+                    <input type="hidden" name="within" id="f-within" value="{{ $within ?: '' }}">
                     <input type="text" name="q" value="{{ $search }}" placeholder="Search filename or db…" />
                     <label class="muted" style="font-size:12px;">From
                         <input type="date" name="from" value="{{ $from }}" />
@@ -116,10 +122,26 @@
                         $bsYesterday = now()->subDay()->toDateString();
                     @endphp
                     <span class="filter-group">
-                        <button type="button" class="filter-pill js-date-preset {{ ($from === $bsToday && $to === $bsToday) ? 'active' : '' }}"
+                        <button type="button" class="filter-pill js-date-preset {{ (!$within && $from === $bsToday && $to === $bsToday) ? 'active' : '' }}"
                                 data-date="{{ $bsToday }}" title="Backups created today">Today</button>
-                        <button type="button" class="filter-pill js-date-preset {{ ($from === $bsYesterday && $to === $bsYesterday) ? 'active' : '' }}"
+                        <button type="button" class="filter-pill js-date-preset {{ (!$within && $from === $bsYesterday && $to === $bsYesterday) ? 'active' : '' }}"
                                 data-date="{{ $bsYesterday }}" title="Backups created yesterday">Yesterday</button>
+                        @php
+                            $bsWithinLabels = [30 => 'Last 30 minutes', 60 => 'Last hour', 180 => 'Last 3 hours', 360 => 'Last 6 hours', 720 => 'Last 12 hours'];
+                            $bsWithinShort = [30 => '30m', 60 => '1h', 180 => '3h', 360 => '6h', 720 => '12h'];
+                        @endphp
+                        <span class="bs-within">
+                            <button type="button" class="filter-pill bs-within-btn {{ $within ? 'active' : '' }}" id="bs-within-btn"
+                                    title="{{ $within ? $bsWithinLabels[$within] : 'Recent backups (last N hours)' }}">🕒{{ $within ? ' ' . $bsWithinShort[$within] : '' }} ▾</button>
+                            <span class="bs-within-menu" id="bs-within-menu">
+                                @foreach($bsWithinLabels as $bsMin => $bsLabel)
+                                    <button type="button" class="bs-within-opt js-within {{ $within === $bsMin ? 'active' : '' }}" data-minutes="{{ $bsMin }}">{{ $bsLabel }}</button>
+                                @endforeach
+                                @if($within)
+                                    <button type="button" class="bs-within-opt js-within bs-within-clear" data-minutes="">✕ Clear</button>
+                                @endif
+                            </span>
+                        </span>
                     </span>
                     @if(count($connectionLabels ?? []) > 1)
                         <select name="connection" title="Filter by database">
@@ -135,7 +157,7 @@
                         @endforeach
                     </select>
                     <button class="btn" type="submit">Filter</button>
-                    @if($search || ($status && $status !== 'all') || ($pinned && $pinned !== 'all') || $from || $to || $connection)
+                    @if($search || ($status && $status !== 'all') || ($pinned && $pinned !== 'all') || $from || $to || $within || $connection)
                         <a class="btn" href="{{ route('backup-station.index') }}" title="Reset filters">✕ Reset</a>
                     @endif
                 </form>
@@ -164,6 +186,9 @@
                 <span class="muted"><strong id="bs-select-count">0</strong> selected</span>
                 <span style="margin-left:auto; display:flex; gap:8px;">
                     <button type="button" class="btn btn-sm btn-success" id="bs-select-download" disabled>↓ Download Selected</button>
+                    @if($bsCanDelete)
+                        <button type="button" class="btn btn-sm btn-danger" id="bs-select-delete" disabled>🗑 Delete Selected</button>
+                    @endif
                     <button type="button" class="btn btn-sm" id="bs-select-cancel">Cancel</button>
                 </span>
             </div>
@@ -172,6 +197,12 @@
                 <input type="hidden" name="download_password" value="" id="bulk-dl-pw">
                 <div id="bulk-dl-ids"></div>
             </form>
+            @if($bsCanDelete)
+                <form method="POST" action="{{ route('backup-station.delete-multiple') }}" id="bulk-del-form" style="display:none">
+                    @csrf
+                    <div id="bulk-del-ids"></div>
+                </form>
+            @endif
 
             <table class="bk-table">
                 <thead>
@@ -196,8 +227,9 @@
                     @endphp
                     <tr>
                         <td class="bs-sel-col">
-                            @if($bsDownloadable)
-                                <input type="checkbox" class="bs-row-cb" value="{{ $id }}" title="Select for download">
+                            @if($bsDownloadable || $bsCanDelete)
+                                <input type="checkbox" class="bs-row-cb" value="{{ $id }}" data-downloadable="{{ $bsDownloadable ? '1' : '0' }}"
+                                       title="{{ $bsDownloadable ? 'Select' : 'Select (delete only — not downloadable)' }}">
                             @endif
                         </td>
                         <td>
@@ -466,6 +498,13 @@
     .bs-combo-opt { padding:7px 10px; border-radius:var(--radius-sm); cursor:pointer; font-size:12.5px; }
     .bs-combo-opt:hover { background:var(--hover); }
     .bs-combo-opt.active { background:var(--primary); color:#fff; }
+    .bs-within { position:relative; display:inline-flex; }
+    .bs-within-menu { display:none; position:absolute; top:calc(100% + 6px); right:0; min-width:160px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-sm); box-shadow:var(--shadow-lg); z-index:60; padding:6px; flex-direction:column; }
+    .bs-within-menu.open { display:flex; }
+    .bs-within-opt { text-align:left; padding:7px 10px; border:0; background:transparent; color:var(--text); border-radius:var(--radius-sm); cursor:pointer; font-size:12.5px; font-family:inherit; white-space:nowrap; }
+    .bs-within-opt:hover { background:var(--hover); }
+    .bs-within-opt.active { background:var(--primary); color:#fff; }
+    .bs-within-clear { color:var(--text-muted); border-top:1px solid var(--border-light); border-radius:0; margin-top:4px; padding-top:8px; }
     .bs-combo-empty { padding:10px; color:var(--text-muted); font-size:12px; text-align:center; }
 </style>
 
@@ -979,6 +1018,7 @@
         const selectAll = document.getElementById('bs-select-all');
         const countEl = document.getElementById('bs-select-count');
         const dlBtn = document.getElementById('bs-select-download');
+        const delBtn = document.getElementById('bs-select-delete');
         const cancelBtn = document.getElementById('bs-select-cancel');
         const rowCbs = Array.from(document.querySelectorAll('.bs-row-cb'));
         const needsPw = {{ config('backup-station.download_password') ? 'true' : 'false' }};
@@ -986,12 +1026,18 @@
         if (!toggleBtn) return;
 
         function checked() { return rowCbs.filter(cb => cb.checked); }
+        function checkedDownloadable() { return checked().filter(cb => cb.dataset.downloadable === '1'); }
 
         function refresh() {
             const n = checked().length;
+            const d = checkedDownloadable().length;
             countEl.textContent = n;
-            dlBtn.disabled = n === 0;
-            dlBtn.textContent = '↓ Download Selected' + (n ? ' (' + n + ')' : '');
+            dlBtn.disabled = d === 0;
+            dlBtn.textContent = '↓ Download Selected' + (d ? ' (' + d + ')' : '');
+            if (delBtn) {
+                delBtn.disabled = n === 0;
+                delBtn.textContent = '🗑 Delete Selected' + (n ? ' (' + n + ')' : '');
+            }
             selectAll.checked = rowCbs.length > 0 && n === rowCbs.length;
             selectAll.indeterminate = n > 0 && n < rowCbs.length;
             rowCbs.forEach(cb => cb.closest('tr').classList.toggle('bs-row-selected', cb.checked));
@@ -1014,17 +1060,8 @@
         });
         rowCbs.forEach(cb => cb.addEventListener('change', refresh));
 
-        dlBtn.addEventListener('click', () => {
-            const ids = checked().map(cb => cb.value);
-            if (!ids.length) return;
-
-            if (needsPw) {
-                const pw = window.prompt('Enter the download password:');
-                if (pw === null || pw === '') return;
-                document.getElementById('bulk-dl-pw').value = pw;
-            }
-
-            const holder = document.getElementById('bulk-dl-ids');
+        function fillIds(holderId, ids) {
+            const holder = document.getElementById(holderId);
             holder.innerHTML = '';
             ids.forEach(id => {
                 const input = document.createElement('input');
@@ -1033,6 +1070,37 @@
                 input.value = id;
                 holder.appendChild(input);
             });
+        }
+
+        if (delBtn) {
+            delBtn.addEventListener('click', () => {
+                const ids = checked().map(cb => cb.value);
+                if (!ids.length) return;
+                confirmDialog({
+                    title: 'Delete ' + ids.length + ' Backup(s)?',
+                    message: 'The <strong>' + ids.length + '</strong> selected backup(s) will be permanently deleted, including marked ones. This cannot be undone.',
+                    confirm: 'Delete ' + ids.length,
+                    danger: true,
+                    onConfirm: () => {
+                        fillIds('bulk-del-ids', ids);
+                        showLoading('Deleting ' + ids.length + ' backup(s)…');
+                        document.getElementById('bulk-del-form').submit();
+                    }
+                });
+            });
+        }
+
+        dlBtn.addEventListener('click', () => {
+            const ids = checkedDownloadable().map(cb => cb.value);
+            if (!ids.length) return;
+
+            if (needsPw) {
+                const pw = window.prompt('Enter the download password:');
+                if (pw === null || pw === '') return;
+                document.getElementById('bulk-dl-pw').value = pw;
+            }
+
+            fillIds('bulk-dl-ids', ids);
             document.getElementById('bulk-dl-form').submit();
         });
 
@@ -1112,22 +1180,58 @@
             const form = document.getElementById('filter-form');
             form.querySelector('[name=from]').value = btn.dataset.date;
             form.querySelector('[name=to]').value = btn.dataset.date;
+            document.getElementById('f-within').value = '';
             form.submit();
         });
     });
 
+    // "Last N minutes" dropdown — a relative window replaces the date bounds.
+    (function () {
+        const btn = document.getElementById('bs-within-btn');
+        const menu = document.getElementById('bs-within-menu');
+        if (!btn) return;
+        btn.addEventListener('click', (e) => { e.stopPropagation(); menu.classList.toggle('open'); });
+        document.addEventListener('click', (e) => { if (!menu.contains(e.target)) menu.classList.remove('open'); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') menu.classList.remove('open'); });
+        menu.querySelectorAll('.js-within').forEach(opt => {
+            opt.addEventListener('click', () => {
+                const form = document.getElementById('filter-form');
+                document.getElementById('f-within').value = opt.dataset.minutes;
+                form.querySelector('[name=from]').value = '';
+                form.querySelector('[name=to]').value = '';
+                form.submit();
+            });
+        });
+    })();
+
+    // Picking a calendar date manually drops the relative window.
+    document.querySelectorAll('#filter-form input[type=date]').forEach(inp => {
+        inp.addEventListener('change', () => { document.getElementById('f-within').value = ''; });
+    });
+
     document.querySelectorAll('.js-cleanup').forEach(btn => {
         btn.addEventListener('click', () => {
+            const policyMsg = 'This will permanently delete backups that exceed the retention policy (max copies, age limit, monthly cap). Pinned and monthly snapshots are protected.';
+            const allMsg = '<strong style="color:var(--danger-text)">Every backup will be permanently deleted</strong> — the retention policy is ignored and marked (pinned) and monthly snapshots are <strong>not</strong> protected. This cannot be undone.';
             confirmDialog({
                 title: 'Run Cleanup?',
-                message: 'This will permanently delete backups that exceed the retention policy (max copies, age limit, monthly cap). Pinned and monthly snapshots are protected.',
+                message: '<div id="cleanup-msg">' + policyMsg + '</div>'
+                    + '<label style="display:flex;align-items:center;gap:8px;margin-top:14px;cursor:pointer;user-select:none;color:var(--text);">'
+                    + '<input type="checkbox" id="cleanup-all-cb" style="width:15px;height:15px;cursor:pointer;"> Delete <strong>all</strong> backups (ignore retention policy)</label>',
                 confirm: 'Run Cleanup',
                 danger: true,
                 onConfirm: () => {
-                    const f = document.getElementById('cleanup-form');
+                    const all = document.getElementById('cleanup-all-cb')?.checked;
+                    const f = document.getElementById(all ? 'clear-all-form' : 'cleanup-form');
                     showLoading(f.dataset.loading || 'Running cleanup…');
                     f.submit();
                 }
+            });
+            const cb = document.getElementById('cleanup-all-cb');
+            const ok = document.getElementById('confirm-ok');
+            cb.addEventListener('change', () => {
+                document.getElementById('cleanup-msg').innerHTML = cb.checked ? allMsg : policyMsg;
+                ok.textContent = cb.checked ? 'Delete All Backups' : 'Run Cleanup';
             });
         });
     });

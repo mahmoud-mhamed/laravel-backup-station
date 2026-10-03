@@ -38,6 +38,11 @@ class RunBackupJob implements ShouldQueue
 
     public function handle(BackupStationService $service): void
     {
+        // When run after the HTTP response (no queue worker), keep going even
+        // though the client is gone and PHP's max_execution_time would hit.
+        ignore_user_abort(true);
+        @set_time_limit(0);
+
         $service->runBackup($this->connection, $this->note, $this->overrides, $this->scheduled);
     }
 }

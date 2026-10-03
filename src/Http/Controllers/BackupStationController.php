@@ -11,6 +11,9 @@ use Throwable;
 
 class BackupStationController extends Controller
 {
+    /** Allowed values (minutes) for the "last N minutes" filter preset. */
+    public const WITHIN_OPTIONS = [30, 60, 180, 360, 720];
+
     public function __construct(protected BackupStationService $service)
     {
     }
@@ -62,9 +65,18 @@ class BackupStationController extends Controller
         $from = trim((string) $request->query('from', '')); // Y-m-d
         $to = trim((string) $request->query('to', ''));     // Y-m-d
         $connection = trim((string) $request->query('connection', ''));
+        $within = (int) $request->query('within', 0);       // minutes — "last N minutes" preset
+        if (!in_array($within, self::WITHIN_OPTIONS, true)) {
+            $within = 0;
+        }
 
         $fromTs = $from !== '' ? strtotime($from . ' 00:00:00') : null;
         $toTs = $to !== '' ? strtotime($to . ' 23:59:59') : null;
+        if ($within > 0) {
+            // A relative window overrides the calendar bounds.
+            $fromTs = time() - $within * 60;
+            $toTs = null;
+        }
 
         $filtered = array_filter($entries, function ($e) use ($status, $search, $pinned, $fromTs, $toTs, $connection) {
             if ($status && $status !== 'all' && ($e['status'] ?? null) !== $status) {
@@ -139,6 +151,7 @@ class BackupStationController extends Controller
             'from' => $from,
             'to' => $to,
             'connection' => $connection,
+            'within' => $within,
             'dbSize' => $this->service->databaseSize($connection !== '' ? $connection : null),
             // Without a connection filter on a multi-database setup, the
             // card shows the combined size of every database in scope.
@@ -203,6 +216,15 @@ class BackupStationController extends Controller
         if (config('backup-station.queue.enabled')) {
             \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch($connection, $note ?: null, $overrides);
             return back()->with('flash', 'Backup queued — it will run in the background.');
+        }
+
+        // Without a queue worker, a multi-connection run (e.g. dozens of
+        // tenant databases) easily outlives proxy limits such as Cloudflare's
+        // 100s gateway timeout. Send the response first, then run the backup
+        // in the same PHP process once the client has been released.
+        if (config('backup-station.queue.after_response', true)) {
+            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatchAfterResponse($connection, $note ?: null, $overrides);
+            return back()->with('flash', 'Backup started in the background — refresh in a few minutes to see the results.');
         }
 
         try {
@@ -327,7 +349,7 @@ class BackupStationController extends Controller
     {
         abort_unless((bool) config('backup-station.allow_delete', true), 403, 'Delete is disabled.');
 
-        $ids = (array) $request->input('ids', []);
+        $ids = array_values(array_unique(array_filter((array) $request->input('ids', []), 'is_string')));
         $count = 0;
         foreach ($ids as $id) {
             if ($this->service->deleteBackup($id)) $count++;

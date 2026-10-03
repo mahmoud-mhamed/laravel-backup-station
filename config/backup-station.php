@@ -89,6 +89,11 @@ return [
         'connection' => env('BACKUP_STATION_QUEUE_CONNECTION'),
         // When null, the configured connection's default queue is used.
         'queue' => env('BACKUP_STATION_QUEUE_NAME'),
+        // When the queue is disabled, run dashboard backups after the HTTP
+        // response is sent instead of inside the request. Prevents gateway
+        // timeouts (Cloudflare 504 / nginx) when backing up many databases.
+        // Set to false to restore the old blocking behaviour.
+        'after_response' => (bool) env('BACKUP_STATION_AFTER_RESPONSE', true),
     ],
 
     /*

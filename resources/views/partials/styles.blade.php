@@ -118,7 +118,8 @@
     .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 
     .pin { color: var(--warning-text); cursor: pointer; }
-    .pin.off { color: var(--text-light); }
+    .pin.off { color: var(--text-light); filter: grayscale(1); opacity: 0.35; }
+    .pin.off:hover { opacity: 0.8; }
     .pin-indicator { color: var(--warning-text); margin-right: 4px; font-size: 12px; }
 
     /* Loading overlay */

@@ -33,7 +33,7 @@
                     <span style="color:var(--success-text)">✓ {{ $stats['backups_success'] ?? $stats['success'] }} success</span>
                     <span style="color:var(--danger-text)">· ✗ {{ $stats['backups_failed'] ?? $stats['failed'] }} failed</span>
                 </div>
-                <div class="sub">{{ $stats['monthly'] }} monthly · {{ $stats['pinned'] }} pinned</div>
+                <div class="sub">{{ $stats['monthly'] }} monthly · 🔒 {{ $stats['pinned'] }} protected</div>
             </div>
             <div class="stat" style="border-left: 3px solid {{ $bsRateColor }}">
                 <div class="label">Success Rate</div>
@@ -173,8 +173,8 @@
                     <div class="filter-group">
                         <span class="filter-label">Mark</span>
                         <button type="button" class="filter-pill {{ $curPinned === 'all' ? 'active' : '' }}"      data-field="f-pinned" data-value="all">All</button>
-                        <button type="button" class="filter-pill {{ $curPinned === 'pinned' ? 'active' : '' }}"   data-field="f-pinned" data-value="pinned">★ Marked</button>
-                        <button type="button" class="filter-pill {{ $curPinned === 'unpinned' ? 'active' : '' }}" data-field="f-pinned" data-value="unpinned">☆ Unmarked</button>
+                        <button type="button" class="filter-pill {{ $curPinned === 'pinned' ? 'active' : '' }}"   data-field="f-pinned" data-value="pinned">🔒 Protected</button>
+                        <button type="button" class="filter-pill {{ $curPinned === 'unpinned' ? 'active' : '' }}" data-field="f-pinned" data-value="unpinned">Not protected</button>
                     </div>
                 </div>
             </div>
@@ -228,7 +228,7 @@
                     <tr>
                         <td class="bs-sel-col">
                             @if($bsDownloadable || $bsCanDelete)
-                                <input type="checkbox" class="bs-row-cb" value="{{ $id }}" data-downloadable="{{ $bsDownloadable ? '1' : '0' }}"
+                                <input type="checkbox" class="bs-row-cb" value="{{ $id }}" data-downloadable="{{ $bsDownloadable ? '1' : '0' }}" data-pinned="{{ empty($b['pinned']) ? '0' : '1' }}"
                                        title="{{ $bsDownloadable ? 'Select' : 'Select (delete only — not downloadable)' }}">
                             @endif
                         </td>
@@ -236,7 +236,7 @@
                             <form method="POST" action="{{ route('backup-station.pin') }}" style="display:inline">
                                 @csrf
                                 <input type="hidden" name="id" value="{{ $id }}">
-                                <button type="submit" class="pin {{ empty($b['pinned']) ? 'off' : '' }}" title="{{ empty($b['pinned']) ? 'Mark' : 'Unmark' }}" style="background:none;border:none;font-size:18px;cursor:pointer;padding:2px 4px;">★</button>
+                                <button type="submit" class="pin {{ empty($b['pinned']) ? 'off' : '' }}" title="{{ empty($b['pinned']) ? 'Keep forever — never auto-deleted' : 'Protected — never auto-deleted (click to remove protection)' }}" style="background:none;border:none;font-size:16px;cursor:pointer;padding:2px 4px;">🔒</button>
                             </form>
                         </td>
                         <td>
@@ -246,6 +246,7 @@
                                 {{ $b['filename'] ?? '—' }}
                             </div>
                             @if(!empty($b['note']))<div class="muted bk-note js-note" data-id="{{ $id }}" data-note="{{ $b['note'] }}" title="Click to edit note">{{ $b['note'] }}</div>@endif
+                            @if(!empty($b['pinned']))<span class="badge badge-warning" style="margin-top:4px" title="Never deleted by the retention policy — only a manual delete removes it">🔒 Protected</span>@endif
                             @if(!empty($b['monthly_keep']))<span class="badge badge-info" style="margin-top:4px">Monthly</span>@endif
                             @if(!$isRestore && !empty($b['encrypted']))
                                 <span class="badge badge-warning" style="margin-top:4px" title="AES-256 password protected">🔒 Encrypted</span>
@@ -354,6 +355,7 @@
                                         <button type="button" class="btn btn-sm btn-danger js-delete"
                                                 data-id="{{ $id }}"
                                                 data-filename="{{ $b['filename'] ?? '—' }}"
+                                                data-pinned="{{ empty($b['pinned']) ? '0' : '1' }}"
                                                 data-disk="{{ $service->diskName() }}">Delete</button>
                                     </form>
                                 @endif
@@ -425,11 +427,23 @@
                 <label class="muted" style="font-size:12px">Backup target</label>
                 <select name="connection" id="run-connection" style="width:100%;margin-top:4px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:13px">
                     <option value="">All databases ({{ count($bsRunTargets) }})</option>
+                    <option value="{{ \MahmoudMhamed\BackupStation\Http\Controllers\BackupStationController::TARGET_SCHEDULED }}">Will auto-backup ({{ count($scheduledTargets ?? []) }})</option>
                     @foreach($bsRunTargets as $bsName => $bsLabel)
                         <option value="{{ $bsName }}">{{ $bsLabel === $bsName ? $bsName : $bsLabel . ' — ' . $bsName }}</option>
                     @endforeach
                 </select>
                 <div class="muted" style="font-size:11px;margin-top:4px" id="run-target-hint">Full dump of every database listed above.</div>
+                <div class="muted" style="font-size:11px;margin-top:4px;display:none" id="run-scheduled-hint">
+                    Full dump of only the databases the next automatic (scheduled) run will back up:
+                    <div style="max-height:96px;overflow:auto;margin-top:4px;padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg)">
+                        @forelse($scheduledTargets ?? [] as $bsName)
+                            @php $bsLabel = $bsRunTargets[$bsName] ?? $bsName; @endphp
+                            <div>{{ $bsLabel === $bsName ? $bsName : $bsLabel . ' — ' . $bsName }}</div>
+                        @empty
+                            <div>No database is in scope for automatic backups.</div>
+                        @endforelse
+                    </div>
+                </div>
             </div>
         @endif
 
@@ -661,8 +675,13 @@
     const runConnSelect = document.getElementById('run-connection');
     const runTablesSection = document.getElementById('run-tables-section');
 
+    // "All databases" and "Will auto-backup" are both multi-database full dumps.
+    function runTargetIsScheduled() {
+        return !!runConnSelect && runConnSelect.value === '{{ \MahmoudMhamed\BackupStation\Http\Controllers\BackupStationController::TARGET_SCHEDULED }}';
+    }
+
     function runTargetIsAll() {
-        return !!runConnSelect && runConnSelect.value === '';
+        return !!runConnSelect && (runConnSelect.value === '' || runTargetIsScheduled());
     }
 
     function syncRunTargetUi() {
@@ -673,7 +692,9 @@
         const all = runTargetIsAll();
         runTablesSection.style.display = all ? 'none' : 'flex';
         const hint = document.getElementById('run-target-hint');
-        if (hint) hint.style.display = all ? '' : 'none';
+        if (hint) hint.style.display = all && !runTargetIsScheduled() ? '' : 'none';
+        const scheduledHint = document.getElementById('run-scheduled-hint');
+        if (scheduledHint) scheduledHint.style.display = runTargetIsScheduled() ? '' : 'none';
         if (!all && !runTablesLoaded) loadRunTables(runConnSelect.value);
     }
 
@@ -1076,9 +1097,13 @@
             delBtn.addEventListener('click', () => {
                 const ids = checked().map(cb => cb.value);
                 if (!ids.length) return;
+                const protectedCount = checked().filter(cb => cb.dataset.pinned === '1').length;
                 confirmDialog({
                     title: 'Delete ' + ids.length + ' Backup(s)?',
-                    message: 'The <strong>' + ids.length + '</strong> selected backup(s) will be permanently deleted, including marked ones. This cannot be undone.',
+                    message: (protectedCount
+                            ? '<strong style="color:var(--danger-text)">🔒 ' + protectedCount + ' of them ' + (protectedCount === 1 ? 'is' : 'are') + ' protected (keep forever).</strong> They will be deleted too.<br><br>'
+                            : '')
+                        + 'The <strong>' + ids.length + '</strong> selected backup(s) will be permanently deleted. This cannot be undone.',
                     confirm: 'Delete ' + ids.length,
                     danger: true,
                     onConfirm: () => {
@@ -1150,12 +1175,16 @@
             const id = btn.dataset.id;
             const filename = btn.dataset.filename || '—';
             const disk = btn.dataset.disk || '';
+            const isProtected = btn.dataset.pinned === '1';
             confirmDialog({
-                title: 'Delete Backup?',
-                message: 'The file <code>' + escapeHtml(filename) + '</code> will be permanently deleted'
+                title: isProtected ? 'Delete Protected Backup?' : 'Delete Backup?',
+                message: (isProtected
+                        ? '<strong style="color:var(--danger-text)">🔒 This backup is protected (keep forever).</strong> Deleting it removes the protection too.<br><br>'
+                        : '')
+                    + 'The file <code>' + escapeHtml(filename) + '</code> will be permanently deleted'
                     + (disk ? ' from <code>' + escapeHtml(disk) + '</code>' : '')
                     + '. This cannot be undone.',
-                confirm: 'Delete',
+                confirm: isProtected ? 'Delete protected backup' : 'Delete',
                 danger: true,
                 onConfirm: () => {
                     const f = document.getElementById('del-form-' + id);
@@ -1212,7 +1241,7 @@
     document.querySelectorAll('.js-cleanup').forEach(btn => {
         btn.addEventListener('click', () => {
             const policyMsg = 'This will permanently delete backups that exceed the retention policy (max copies, age limit, monthly cap). Pinned and monthly snapshots are protected.';
-            const allMsg = '<strong style="color:var(--danger-text)">Every backup will be permanently deleted</strong> — the retention policy is ignored and marked (pinned) and monthly snapshots are <strong>not</strong> protected. This cannot be undone.';
+            const allMsg = '<strong style="color:var(--danger-text)">Every backup will be permanently deleted</strong> — the retention policy is ignored and 🔒 protected and monthly snapshots are deleted too. This cannot be undone.';
             confirmDialog({
                 title: 'Run Cleanup?',
                 message: '<div id="cleanup-msg">' + policyMsg + '</div>'

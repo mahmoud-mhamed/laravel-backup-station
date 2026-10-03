@@ -8,7 +8,7 @@ Automatic database backups for Laravel — schedule, retention rules, monthly sn
 - 🗂️ **Max copies retention** — hard cap on the number of backup files
 - 🗓️ **Monthly keep rule** — keep one backup from a chosen day-of-month for N months
 - ⏳ **Age-based pruning** — delete backups older than X days
-- 📌 **Mark** important backups so retention never deletes them
+- 🔒 **Protect** important backups (keep forever) so retention never deletes them
 - ↺ **Restore** any successful backup back into its database with one click
 - ⚠ **Missing-file detection** — entries whose file no longer exists on the disk are flagged in the dashboard
 - 🐬 **Multi-driver** — MySQL/MariaDB, PostgreSQL, SQLite
@@ -138,6 +138,32 @@ runtime, so dumps, restores, table listings and size queries all work on
 them transparently. On a full run, one broken database (e.g. a stale
 tenant) is recorded as a failed entry and the run continues with the rest.
 
+### Filtering automatic runs
+
+To skip some provider databases on **scheduled** runs only (e.g. tenants
+without an active subscription), also implement
+`FiltersScheduledConnections`. Manual runs, dashboard listings, labels,
+downloads and restores still see every connection.
+
+```php
+use MahmoudMhamed\BackupStation\Contracts\FiltersScheduledConnections;
+
+class MyBackupConnectionProvider implements BackupConnectionProvider, FiltersScheduledConnections
+{
+    // …
+
+    public function scheduledConnections(array $connections): array
+    {
+        $active = Tenant::active()->get()->map(fn ($t) => $t->database()->getName());
+
+        return array_values(array_intersect($connections, ['mysql', ...$active]));
+    }
+}
+```
+
+The filter runs before the [automatic backup scope](#automatic-backup-scope)
+settings.
+
 ### Custom route registration
 
 Multi-tenant apps often need the dashboard registered per domain group
@@ -226,14 +252,18 @@ The dashboard at `/backup-station` shows:
   average duration, sizes (total + average per backup), combined live
   size of every configured database, and the latest backup with the
   first-success date and coverage span
-- Full list with **Download**, **Rename**, **Pin**, **Delete** actions
+- Full list with **Download**, **Rename**, **🔒 Protect**, **Delete** actions.
+  Protected backups (`"pinned": true` in `backups.json`) show a *🔒 Protected*
+  badge, are never removed by the retention policy, and deleting one by hand
+  asks for an explicit confirmation
 - **Select Multiple** — toggles a checkbox column with select-all; the
   selected backups are bundled into one `backups-<timestamp>.zip`
   (respects `BACKUP_STATION_DOWNLOAD_PASSWORD` when set) or deleted together
   (when `allow_delete` is on)
 - **Cleanup** applies the retention policy; tick "Delete all backups" in the
   dialog to wipe every backup instead (pinned/monthly included)
-- "Run Backup Now" with a target selector — all databases or a single
+- "Run Backup Now" with a target selector — all databases, *Will auto-backup*
+  (exactly the databases the next scheduled run covers), or a single
   one (searchable dropdown, per-table structure/data picker)
 - Search, date range (plus Today / Yesterday and a 🕒 "last 30 min / 1h /
   3h / 6h / 12h" dropdown), status and database filters, per-page control

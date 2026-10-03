@@ -8,6 +8,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use MahmoudMhamed\BackupStation\Contracts\BackupConnectionProvider;
+use MahmoudMhamed\BackupStation\Contracts\FiltersScheduledConnections;
 use MahmoudMhamed\BackupStation\Notifications\BackupNotifier;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -213,12 +214,19 @@ class BackupStationService
      * or an "only these" restriction). Manual runs ignore this scope:
      * explicit single-connection runs may target any configured
      * connection, and a manual "all databases" run covers everything.
+     * A provider implementing FiltersScheduledConnections narrows the list
+     * first (e.g. active tenants only).
      *
      * @return string[]
      */
     public function backupConnections(): array
     {
         $all = $this->allBackupConnections();
+
+        $provider = $this->connectionProvider();
+        if ($provider instanceof FiltersScheduledConnections) {
+            $all = array_values(array_intersect($all, $provider->scheduledConnections($all)));
+        }
         $settings = $this->loadBackupSettings();
 
         if ($settings['mode'] === 'only' && $settings['only']) {

@@ -158,12 +158,12 @@
                     <span class="icon">#</span>
                     <h4>Max Copies Cap</h4>
                     <p>Hard limit on the total number of backup files. Oldest are pruned first while
-                       marked and monthly snapshots are protected.</p>
+                       protected and monthly snapshots are kept.</p>
                 </div>
                 <div class="feature">
                     <span class="icon">⏳</span>
                     <h4>Age-Based Pruning</h4>
-                    <p>Auto-delete backups older than X days. Marked and monthly snapshots are excluded
+                    <p>Auto-delete backups older than X days. Protected and monthly snapshots are excluded
                        from this rule.</p>
                 </div>
                 <div class="feature">
@@ -177,7 +177,7 @@
                     <h4>Metadata Size Cap</h4>
                     <p>Hard cap on <kbd>backups.json</kbd> (default <strong>5 MB</strong>). When the file
                        grows past it, the oldest entries — and their backup files — are pruned automatically.
-                       Marked &amp; monthly snapshots are protected.</p>
+                       Protected &amp; monthly snapshots are kept.</p>
                 </div>
                 <div class="feature">
                     <span class="icon">🗓</span>
@@ -186,9 +186,9 @@
                        for long-term archival without keeping every daily backup.</p>
                 </div>
                 <div class="feature">
-                    <span class="icon">★</span>
-                    <h4>Mark Important Backups</h4>
-                    <p>Click the star next to a backup to mark it. Marked backups are <strong>never</strong>
+                    <span class="icon">🔒</span>
+                    <h4>Protect Important Backups</h4>
+                    <p>Click the lock next to a backup to protect it. Protected backups are <strong>never</strong>
                        deleted by retention rules — keep critical snapshots forever.</p>
                 </div>
                 <div class="feature">

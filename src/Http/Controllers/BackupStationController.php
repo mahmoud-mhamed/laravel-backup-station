@@ -159,8 +159,13 @@ class BackupStationController extends Controller
                 ? $this->service->databasesSizeSummary()
                 : null,
             'connectionLabels' => $this->service->connectionLabels(),
+            // Databases the next automatic (scheduled) run will cover.
+            'scheduledTargets' => $this->service->backupConnections(),
         ]);
     }
+
+    /** Run-dialog target value: back up exactly what the next scheduled run would. */
+    public const TARGET_SCHEDULED = '__scheduled__';
 
     public function run(Request $request)
     {
@@ -170,6 +175,13 @@ class BackupStationController extends Controller
         // Explicit targets may be any configured connection, even one
         // excluded from full runs.
         $connection = trim((string) $request->input('connection', ''));
+        $scheduledScope = $connection === self::TARGET_SCHEDULED;
+        if ($scheduledScope) {
+            if (!$this->service->backupConnections()) {
+                return back()->with('flash_error', 'No database is in scope for automatic backups.');
+            }
+            $connection = '';
+        }
         if ($connection !== '' && !in_array($connection, $this->service->allBackupConnections(), true)) {
             return back()->with('flash_error', "Unknown backup target [{$connection}].");
         }
@@ -214,7 +226,7 @@ class BackupStationController extends Controller
         }
 
         if (config('backup-station.queue.enabled')) {
-            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch($connection, $note ?: null, $overrides);
+            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch($connection, $note ?: null, $overrides, $scheduledScope);
             return back()->with('flash', 'Backup queued — it will run in the background.');
         }
 
@@ -223,12 +235,12 @@ class BackupStationController extends Controller
         // 100s gateway timeout. Send the response first, then run the backup
         // in the same PHP process once the client has been released.
         if (config('backup-station.queue.after_response', true)) {
-            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatchAfterResponse($connection, $note ?: null, $overrides);
+            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatchAfterResponse($connection, $note ?: null, $overrides, $scheduledScope);
             return back()->with('flash', 'Backup started in the background — refresh in a few minutes to see the results.');
         }
 
         try {
-            $created = $this->service->runBackup($connection, $note ?: null, $overrides);
+            $created = $this->service->runBackup($connection, $note ?: null, $overrides, $scheduledScope);
             return back()->with('flash', count($created) . ' backup(s) created.');
         } catch (Throwable $e) {
             return back()->with('flash_error', 'Backup failed: ' . $e->getMessage());
@@ -382,8 +394,14 @@ class BackupStationController extends Controller
 
     public function pin(Request $request)
     {
-        $this->service->togglePin($request->input('id'));
-        return back()->with('flash', 'Mark toggled.');
+        $entry = $this->service->togglePin($request->input('id'));
+        if (!$entry) {
+            return back()->with('flash_error', 'Backup not found.');
+        }
+
+        return back()->with('flash', !empty($entry['pinned'])
+            ? '🔒 Backup protected — it will never be deleted automatically.'
+            : 'Protection removed — the retention policy applies to this backup again.');
     }
 
     public function restore(Request $request)

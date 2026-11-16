@@ -98,6 +98,31 @@ Edit `config/backup-station.php`:
 
 The package auto-registers its scheduler — just make sure Laravel's `schedule:run` is wired up (Laravel 11+ does this for you).
 
+### Storage quota
+
+`import.total_quota_kb` (`BACKUP_STATION_TOTAL_QUOTA_KB`, default 5 GB, `0` = no cap) limits the total size of stored backups.
+
+- A backup is refused when the stored backups exceed the cap. Backups that the retention policy deletes after the run count as free, so old backups never block the backup that would remove them.
+- A refused backup is saved as a failed entry in the dashboard and sends the `on_failure` notification. On a multi-connection run, the first refusal stops the run.
+- While the next backup would be refused, the dashboard shows a red alert at the top with the used size, the cap, what retention will free, and the date of the last successful backup. `BackupStation::quotaStatus()` returns the same figures.
+- Imports are refused when the stored backups plus the uploaded file would exceed the cap.
+- Size the cap to hold every backup the retention policy keeps (`keep_for_days` daily copies plus `keep_months` monthly ones). A smaller cap stops backups once it fills up.
+- The alert also suggests a `BACKUP_STATION_TOTAL_QUOTA_KB` value: the latest backup size of each database times the copies the retention policy keeps (recent, monthly, protected, plus the run being written), plus 20% for growth. It warns when the server disk cannot hold that. `BackupStation::suggestedQuota()` returns the same figures.
+- The refusal throws `MahmoudMhamed\BackupStation\Exceptions\QuotaExceededException`, which extends `RuntimeException`.
+
+## Backup Progress
+
+Every backup run (the dashboard button, the scheduler, `backup-station:run` or `BackupStation::runBackup()`) records its progress, and the dashboard shows it live, polling every 2 seconds while a run is active:
+
+- the database being backed up, and on a multi-database run its position (`Database 14 of 40`), an overall bar and the count of done, failed and skipped databases;
+- the stage: dumping (current table, table count, bytes written against an estimate from the database size, shown with `~` because a dump is rarely the same size as the tables), compressing or encrypting (with a percentage where libzip reports one), and saving to the disk;
+- why it failed, per database: the dump error, a full quota, or a PHP fatal error such as running out of memory;
+- a run that stops updating for `progress.stale_after` seconds as "stopped responding", and a queued run that no worker picks up.
+
+Progress is saved as `runs/<id>.json` on the backup disk, so it works when the backup runs after the response, on a queue worker on another server, or from the scheduler. Successful runs stay on the dashboard for 10 minutes, failed ones for 24 hours or until dismissed. Set `BACKUP_STATION_PROGRESS=false` to turn it off. See the `progress` config section for the timings.
+
+When a backup has no note and keeps some tables' structure without their data, the note says so, e.g. `without activity log data`.
+
 ## Multi-Tenant / Dynamic Connections
 
 When the set of databases is not known at config time (e.g. one database
@@ -255,6 +280,9 @@ The dashboard at `/backup-station` shows:
   total space with a usage bar) — only for `local` storage disks; remote
   disks such as S3 (or any read failure) hide the card. Hide it always with
   `viewer.show_server_disk_space => false`
+- Backups created by a run still shown in the progress panel are highlighted
+  in the list with a **New** badge, until the run leaves the panel or is
+  dismissed
 - Full list with **Download**, **Rename**, **🔒 Protect**, **Delete** actions.
   Protected backups (`"pinned": true` in `backups.json`) show a *🔒 Protected*
   badge, are never removed by the retention policy, and deleting one by hand
@@ -267,7 +295,9 @@ The dashboard at `/backup-station` shows:
   dialog to wipe every backup instead (pinned/monthly included)
 - "Run Backup Now" with a target selector — all databases, *Will auto-backup*
   (exactly the databases the next scheduled run covers), or a single
-  one (searchable dropdown, per-table structure/data picker)
+  one (searchable dropdown, per-table structure/data picker) — and a
+  **Format** picker (ZIP, gzip or plain SQL; defaults to `archive`). With
+  encryption on, the only format is the encrypted ZIP
 - Search, date range (plus Today / Yesterday and a 🕒 "last 30 min / 1h /
   3h / 6h / 12h" dropdown), status and database filters, per-page control
 - **Databases** page — one row per configured database with live size,

@@ -91,6 +91,14 @@
     .badge-danger { background: var(--danger-bg); color: var(--danger-text); }
     .badge-info { background: var(--info-bg); color: var(--info-text); }
     .badge-warning { background: var(--warning-bg); color: var(--warning-text); }
+    .badge-new { background: var(--primary); color: #fff; }
+
+    /* Backups created by a run that just finished */
+    table.bk-table tr.bs-row-new td { background: var(--primary-light); animation: bs-row-new 2.4s ease-out; }
+    table.bk-table tr.bs-row-new td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+    table.bk-table tr.bs-row-new:hover td { background: var(--primary-glow); }
+    @keyframes bs-row-new { from { background: var(--primary-glow); } }
+    @media (prefers-reduced-motion: reduce) { table.bk-table tr.bs-row-new td { animation: none; } }
 
     .flash { padding: 10px 16px; font-size: 13px; border-radius: var(--radius-sm); margin: 10px 0; font-weight: 500; }
     .flash-success { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
@@ -130,4 +138,35 @@
     @keyframes bs-spin { to { transform: rotate(360deg); } }
     .bs-loading .title { font-size: 14px; font-weight: 600; color: var(--text); }
     .bs-loading .sub { font-size: 12px; color: var(--text-muted); }
+
+    /* Backup run progress */
+    .bs-runs { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 14px; }
+    .bs-run { background: var(--bg-card); border: 1px solid var(--border); border-left: 3px solid var(--info-text); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow-sm); min-width: 0; }
+    .bs-run.is-queued, .bs-run.is-partial { border-left-color: var(--warning-text); }
+    .bs-run.is-success { border-left-color: var(--success-text); }
+    .bs-run.is-failed, .bs-run.is-stale { border-left-color: var(--danger-text); }
+    .bs-run-head { display: flex; align-items: baseline; gap: 4px 10px; flex-wrap: wrap; }
+    .bs-run-title { font-weight: 600; }
+    .bs-run.is-success .bs-run-title { color: var(--success-text); }
+    .bs-run.is-failed .bs-run-title, .bs-run.is-stale .bs-run-title { color: var(--danger-text); }
+    .bs-run.is-partial .bs-run-title, .bs-run.is-queued .bs-run-title { color: var(--warning-text); }
+    .bs-run-meta { font-size: 12px; color: var(--text-muted); }
+    .bs-run-dismiss { margin-left: auto; background: none; border: 0; color: var(--text-light); cursor: pointer; font-size: 18px; line-height: 1; padding: 0 6px; border-radius: 4px; }
+    .bs-run-dismiss:hover { color: var(--text); background: var(--hover); }
+    .bs-run-line { display: flex; justify-content: space-between; align-items: baseline; gap: 4px 12px; flex-wrap: wrap; margin-top: 8px; font-size: 13px; min-width: 0; }
+    .bs-run-line > * { min-width: 0; overflow-wrap: anywhere; }
+    .bs-run-sub { font-size: 12px; color: var(--text-muted); }
+    .bs-bar { height: 6px; margin-top: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+    .bs-bar > span { display: block; height: 100%; width: 0; background: var(--primary); border-radius: 3px; transition: width 0.4s ease; }
+    .bs-bar.is-indeterminate > span { width: 30%; animation: bs-indeterminate 1.2s ease-in-out infinite; }
+    @keyframes bs-indeterminate { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+    .bs-run-error { margin-top: 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .bs-run-error b { font-weight: 600; }
+    .bs-run details { margin-top: 8px; font-size: 12px; }
+    .bs-run summary { cursor: pointer; color: var(--text-muted); }
+    .bs-run-list { list-style: none; margin-top: 4px; display: grid; gap: 2px; color: var(--text-muted); }
+    @media (prefers-reduced-motion: reduce) {
+        .bs-bar.is-indeterminate > span { animation: none; width: 100%; opacity: 0.4; }
+        .bs-bar > span { transition: none; }
+    }
 </style>

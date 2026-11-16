@@ -30,11 +30,13 @@ Route::group([
     Route::get('/databases', [BackupStationController::class, 'databases'])->name('backup-station.databases');
     Route::get('/forecast', [BackupStationController::class, 'forecast'])->name('backup-station.forecast');
     Route::get('/tables', [BackupStationController::class, 'tables'])->name('backup-station.tables');
+    Route::get('/runs', [BackupStationController::class, 'runs'])->name('backup-station.runs');
     Route::get('/about', [BackupStationController::class, 'about'])->name('backup-station.about');
 
     // Write actions — throttled
     Route::middleware($actionThrottle)->group(function () {
         Route::post('/run', [BackupStationController::class, 'run'])->name('backup-station.run');
+        Route::post('/runs/dismiss', [BackupStationController::class, 'dismissRun'])->name('backup-station.runs.dismiss');
         Route::post('/import', [BackupStationController::class, 'import'])->name('backup-station.import');
         Route::post('/delete', [BackupStationController::class, 'delete'])->name('backup-station.delete');
         Route::post('/delete-multiple', [BackupStationController::class, 'deleteMultiple'])->name('backup-station.delete-multiple');

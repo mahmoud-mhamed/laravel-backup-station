@@ -164,6 +164,12 @@ class BackupStationController extends Controller
             'serverDisk' => config('backup-station.viewer.show_server_disk_space', true)
                 ? $this->service->serverDiskSpace()
                 : null,
+            // Not filtered: the quota covers every stored backup.
+            'quota' => $quota = $this->service->quotaStatus(),
+            'suggestedQuota' => $quota['exceeded'] ? $this->service->suggestedQuota() : null,
+            'runs' => $runs = $this->service->dashboardRuns(),
+            'newBackupIds' => $this->service->newBackupIds($runs),
+            'lastSuccessAt' => $this->service->stats($entries)['last_success_at'],
         ]);
     }
 
@@ -228,9 +234,22 @@ class BackupStationController extends Controller
             }
         }
 
+        // Archive format for this run; the dialog offers only the allowed ones.
+        $archive = trim((string) $request->input('archive', ''));
+        if ($archive !== '') {
+            if (!isset($this->service->archiveFormatOptions()[$archive])) {
+                return back()->with('flash_error', "Unknown archive format [{$archive}].");
+            }
+            $overrides['archive'] = $archive;
+        }
+
+        // Recorded before the backup starts, so the dashboard shows it at
+        // once — as waiting for a worker when the queue is used.
+        $runId = $this->service->createRun('dashboard', $note ?: null);
+
         if (config('backup-station.queue.enabled')) {
-            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch($connection, $note ?: null, $overrides, $scheduledScope);
-            return back()->with('flash', 'Backup queued — it will run in the background.');
+            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatch($connection, $note ?: null, $overrides, $scheduledScope, $runId);
+            return back()->with('flash', 'Backup queued — progress shows below once a worker picks it up.');
         }
 
         // Without a queue worker, a multi-connection run (e.g. dozens of
@@ -238,16 +257,37 @@ class BackupStationController extends Controller
         // 100s gateway timeout. Send the response first, then run the backup
         // in the same PHP process once the client has been released.
         if (config('backup-station.queue.after_response', true)) {
-            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatchAfterResponse($connection, $note ?: null, $overrides, $scheduledScope);
-            return back()->with('flash', 'Backup started in the background — refresh in a few minutes to see the results.');
+            \MahmoudMhamed\BackupStation\Jobs\RunBackupJob::dispatchAfterResponse($connection, $note ?: null, $overrides, $scheduledScope, $runId);
+            return back()->with('flash', $runId
+                ? 'Backup started in the background — progress shows below.'
+                : 'Backup started in the background — refresh in a few minutes to see the results.');
         }
 
         try {
-            $created = $this->service->runBackup($connection, $note ?: null, $overrides, $scheduledScope);
+            $created = $this->service->runBackup($connection, $note ?: null, $overrides, $scheduledScope, $runId);
             return back()->with('flash', count($created) . ' backup(s) created.');
         } catch (Throwable $e) {
             return back()->with('flash_error', 'Backup failed: ' . $e->getMessage());
         }
+    }
+
+    /** Backup runs for the dashboard's progress panel (polled as JSON). */
+    public function runs()
+    {
+        return response()->json([
+            'runs' => $this->service->dashboardRuns(),
+            'now' => now()->utc()->toIso8601String(),
+        ]);
+    }
+
+    /** Hide a finished run from the progress panel. */
+    public function dismissRun(Request $request)
+    {
+        $this->service->dismissRun((string) $request->input('id', ''));
+
+        return $request->expectsJson()
+            ? response()->json(['ok' => true])
+            : back();
     }
 
     public function tables(Request $request)

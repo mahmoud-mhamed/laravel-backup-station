@@ -9,7 +9,9 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use MahmoudMhamed\BackupStation\Contracts\BackupConnectionProvider;
 use MahmoudMhamed\BackupStation\Contracts\FiltersScheduledConnections;
+use MahmoudMhamed\BackupStation\Exceptions\QuotaExceededException;
 use MahmoudMhamed\BackupStation\Notifications\BackupNotifier;
+use MahmoudMhamed\BackupStation\Progress\BackupRun;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Symfony\Component\Process\Process;
@@ -372,12 +374,287 @@ class BackupStationService
 
         $current = $this->totalSize();
         if (($current + $incomingBytes) > $cap) {
-            throw new RuntimeException(sprintf(
+            throw new QuotaExceededException(sprintf(
                 'Storage quota exceeded: would use %s, cap is %s.',
                 $this->formatBytes($current + $incomingBytes),
                 $this->formatBytes($cap)
             ));
         }
+    }
+
+    /**
+     * Stored backups against the quota. Backups the retention policy
+     * deletes after the next run count as free (`reclaimable`): retention
+     * only runs after a successful backup, so counting them as used would
+     * block the run that frees them, and no backup would ever run again.
+     * `exceeded` is true when the next backup would be refused.
+     *
+     * @return array{enabled:bool, cap:int, used:int, reclaimable:int, after_retention:int, exceeded:bool}
+     */
+    public function quotaStatus(): array
+    {
+        $cap = $this->totalQuotaBytes();
+        $used = $this->totalSize();
+
+        $reclaimable = 0;
+        if ($cap > 0 && $used > $cap) {
+            $reclaimable = array_sum(array_map(
+                fn ($e) => (int) ($e['size'] ?? 0),
+                $this->forecastRetention(0)['entries']
+            ));
+        }
+        $afterRetention = max(0, $used - $reclaimable);
+
+        return [
+            'enabled' => $cap > 0,
+            'cap' => $cap,
+            'used' => $used,
+            'reclaimable' => $reclaimable,
+            'after_retention' => $afterRetention,
+            'exceeded' => $cap > 0 && $afterRetention > $cap,
+        ];
+    }
+
+    /**
+     * A quota that holds every backup the retention policy keeps, from the
+     * latest backup size of each database and the schedules: daily copies
+     * for keep_for_days (capped by max_backups), monthly copies, pinned
+     * backups, and the run being written before retention prunes. Plus 20%
+     * for growth, rounded up. Null when there is no backup to measure yet,
+     * or when nothing limits how many backups are kept.
+     *
+     * @return array{kb:int, bytes:int, per_backup:int, count:int, regular:int, monthly:int, in_flight:int, pinned:int, pinned_bytes:int}|null
+     */
+    public function suggestedQuota(): ?array
+    {
+        $entries = array_filter($this->loadMetadata(), fn ($e) => ($e['status'] ?? null) === 'success'
+            && ($e['type'] ?? null) !== 'restore' && (int) ($e['size'] ?? 0) > 0);
+
+        // Latest backup size per database.
+        $latest = [];
+        usort($entries, fn ($a, $b) => strcmp($b['created_at'] ?? '', $a['created_at'] ?? ''));
+        foreach ($entries as $e) {
+            $conn = (string) ($e['connection'] ?? '');
+            $latest[$conn] ??= (int) $e['size'];
+        }
+        if (!$latest) {
+            return null;
+        }
+
+        $inScope = $this->backupConnections();
+        $scoped = array_intersect_key($latest, array_flip($inScope));
+        $perBackup = (int) ceil(array_sum($scoped ?: $latest) / count($scoped ?: $latest));
+        $connections = max(1, count($inScope));
+
+        $perDay = 0.0;
+        $perRun = 1;
+        foreach ((array) config('backup-station.schedules', []) as $cfg) {
+            if (empty($cfg['enabled'])) continue;
+            $runConnections = !empty($cfg['connection']) ? 1 : $connections;
+            $perDay += $this->scheduleRunsPerDay($cfg) * $runConnections;
+            $perRun = max($perRun, $runConnections);
+        }
+
+        $keepDays = (int) (config('backup-station.retention.keep_for_days') ?? 0);
+        $maxBackups = (int) (config('backup-station.retention.max_backups') ?? 0);
+        $monthlyRule = config('backup-station.retention.monthly_keep', []);
+        $monthly = !empty($monthlyRule['enabled']) ? max(0, (int) ($monthlyRule['keep_months'] ?? 0)) : 0;
+
+        $pinned = array_filter($entries, fn ($e) => !empty($e['pinned']));
+        $pinnedBytes = array_sum(array_map(fn ($e) => (int) $e['size'], $pinned));
+
+        if ($keepDays <= 0 && $maxBackups <= 0) {
+            return null;
+        }
+        $regular = $keepDays > 0 ? (int) ceil($perDay * $keepDays) : PHP_INT_MAX;
+        if ($maxBackups > 0) {
+            $regular = min($regular, max(0, $maxBackups - $monthly - count($pinned)));
+        }
+
+        $count = $regular + $monthly + $perRun;
+        $bytes = (int) ceil(($count * $perBackup + $pinnedBytes) * 1.2);
+
+        // Round up to a whole GB (or MB below 1 GB) so the value is easy to read.
+        $unit = $bytes >= 1024 ** 3 ? 1024 ** 3 : 1024 ** 2;
+        $bytes = (int) (ceil($bytes / $unit) * $unit);
+
+        return [
+            'kb' => intdiv($bytes, 1024),
+            'bytes' => $bytes,
+            'per_backup' => $perBackup,
+            'count' => $count,
+            'regular' => $regular,
+            'monthly' => $monthly,
+            'in_flight' => $perRun,
+            'pinned' => count($pinned),
+            'pinned_bytes' => $pinnedBytes,
+        ];
+    }
+
+    /** Average runs per day of one configured schedule. */
+    protected function scheduleRunsPerDay(array $cfg): float
+    {
+        $days = $cfg['days'] ?? ['*'];
+        $dayShare = (!is_array($days) || $days === [] || in_array('*', $days, true))
+            ? 1.0
+            : min(7, count(array_unique($days))) / 7;
+
+        switch ($cfg['frequency'] ?? 'daily') {
+            case 'twiceDaily':
+                return 2 * $dayShare;
+            case 'monthly':
+                return 1 / 30;
+            case 'cron':
+                // Count the runs in the next week (capped at one per 5 min).
+                try {
+                    $cron = new \Cron\CronExpression((string) ($cfg['cron'] ?? '0 2 * * *'));
+                    $at = now();
+                    $until = now()->addDays(7);
+                    $runs = 0;
+                    while ($runs < 2016) {
+                        $at = Carbon::instance($cron->getNextRunDate($at));
+                        if ($at->gt($until)) break;
+                        $runs++;
+                    }
+                    return $runs / 7;
+                } catch (Throwable) {
+                    return 1.0;
+                }
+            default:
+                return $dayShare;
+        }
+    }
+
+    /* -------------------------------------------------------------------- */
+    /* Backup runs (progress panel)                                          */
+    /* -------------------------------------------------------------------- */
+
+    /**
+     * Runs for the dashboard: active ones, successful ones for a few minutes
+     * after they finish, and failed ones until dismissed (24 h at most). A
+     * run that stopped updating is reported as "stale" with the likely
+     * reason. Long connection lists are trimmed to counts.
+     */
+    public function dashboardRuns(): array
+    {
+        if (!BackupRun::enabled()) {
+            return [];
+        }
+
+        $now = time();
+        $showSuccess = 60 * max(1, (int) config('backup-station.progress.show_finished_minutes', 10));
+        $showFailed = 3600 * max(1, (int) config('backup-station.progress.show_failed_hours', 24));
+        $runs = [];
+
+        foreach (BackupRun::recent($this, (int) ceil($showFailed / 3600)) as $r) {
+            if (!empty($r['dismissed'])) continue;
+
+            $updated = strtotime((string) ($r['updated_at'] ?? '')) ?: 0;
+            if ($this->runIsStale($r)) {
+                $minutes = max(1, (int) round(($now - $updated) / 60));
+                $r['error'] = ($r['status'] ?? null) === 'queued'
+                    ? "No queue worker has picked this backup up for {$minutes} min. Check that a worker runs for the backup queue."
+                    : "No progress for {$minutes} min: the backup process probably died (killed for memory or time, or the server restarted). Check the server and queue logs.";
+                $r['status'] = 'stale';
+            }
+
+            $finished = strtotime((string) ($r['finished_at'] ?? '')) ?: $updated;
+            $status = $r['status'] ?? 'failed';
+            if ($status === 'success' && $now - $finished > $showSuccess) continue;
+            if (in_array($status, ['failed', 'partial', 'stale'], true) && $now - $finished > $showFailed) continue;
+
+            $runs[] = $this->compactRun($r);
+        }
+
+        // Runs still going first, then newest first (ids start with the time).
+        usort($runs, fn ($a, $b) => [in_array($b['status'], BackupRun::ACTIVE, true), $b['id']]
+            <=> [in_array($a['status'], BackupRun::ACTIVE, true), $a['id']]);
+
+        return $runs;
+    }
+
+    /**
+     * Backup ids created by the runs the dashboard shows (finished in the
+     * last few minutes, or failed and not dismissed), as id => true. The
+     * list highlights these rows as new.
+     *
+     * @return array<string,true>
+     */
+    public function newBackupIds(?array $runs = null): array
+    {
+        $ids = [];
+        foreach ($runs ?? $this->dashboardRuns() as $run) {
+            foreach ($run['entry_ids'] ?? [] as $id) {
+                $ids[$id] = true;
+            }
+        }
+
+        return $ids;
+    }
+
+    public function dismissRun(string $id): bool
+    {
+        $run = BackupRun::find($this, $id);
+        if (!$run || ($run->isActive() && !$this->runIsStale($run->data))) {
+            return false;
+        }
+        $run->dismiss();
+
+        return true;
+    }
+
+    protected function runIsStale(array $run): bool
+    {
+        if (!in_array($run['status'] ?? null, BackupRun::ACTIVE, true)) {
+            return false;
+        }
+        $updated = strtotime((string) ($run['updated_at'] ?? '')) ?: 0;
+        $after = max(60, (int) config('backup-station.progress.stale_after', 600));
+
+        return time() - $updated > $after;
+    }
+
+    /** Replace the per-connection list with counts plus the entries worth showing. */
+    protected function compactRun(array $r): array
+    {
+        $counts = ['pending' => 0, 'running' => 0, 'success' => 0, 'failed' => 0, 'skipped' => 0];
+        $failed = $done = [];
+        $current = null;
+
+        foreach ($r['connections'] ?? [] as $c) {
+            $status = $c['status'] ?? 'pending';
+            $counts[$status] = ($counts[$status] ?? 0) + 1;
+            if ($status === 'failed') {
+                $failed[] = $c;
+            } elseif ($status === 'success') {
+                $done[] = $c;
+            } elseif ($status === 'running') {
+                $current = $c;
+            }
+        }
+
+        $r['entry_ids'] = array_values(array_filter(array_column($r['connections'] ?? [], 'entry_id')));
+        unset($r['connections']);
+        $r['counts'] = $counts;
+        $r['current_connection'] = $current;
+        $r['failed_connections'] = array_slice($failed, 0, 100);
+        $r['done_connections'] = array_slice($done, -100);
+
+        return $r;
+    }
+
+    /** Quota check for a backup run; see quotaStatus(). */
+    public function assertBackupWithinQuota(): void
+    {
+        $quota = $this->quotaStatus();
+        if (!$quota['exceeded']) return;
+
+        throw new QuotaExceededException(sprintf(
+            'Storage quota exceeded: would use %s%s, cap is %s. Raise BACKUP_STATION_TOTAL_QUOTA_KB or delete old backups.',
+            $this->formatBytes($quota['after_retention']),
+            $quota['reclaimable'] > 0 ? ' after the retention policy frees ' . $this->formatBytes($quota['reclaimable']) : '',
+            $this->formatBytes($quota['cap'])
+        ));
     }
 
     /**
@@ -394,88 +671,319 @@ class BackupStationService
      *   tables_data:      string[] — tables to dump INSERT rows for
      *   tables / mode:    legacy — converted to the two arrays above
      *   exclude:          string[] — global exclude (mysqldump --ignore-table)
+     *   archive:          'zip'|'gzip'|'none' — format for this run (see archiveFormatOptions())
      */
-    protected array $runOverrides = [
+    protected const RUN_OVERRIDE_DEFAULTS = [
         'tables_structure' => null,
         'tables_data' => null,
         'tables' => [],
         'exclude' => [],
         'mode' => 'full',
+        'archive' => null,
     ];
+
+    protected array $runOverrides = self::RUN_OVERRIDE_DEFAULTS;
+
+    /** The run whose progress is being recorded, while runBackup() works. */
+    protected ?BackupRun $run = null;
+
+    /** Connection being backed up, for the fatal-error handler. */
+    protected ?array $runCurrent = null;
+
+    /** Memory freed on a fatal error so the handler can still save progress. */
+    protected ?string $fatalReserve = null;
+
+    protected bool $fatalGuardRegistered = false;
+
+    /**
+     * Record a queued run for the dashboard before the backup starts in the
+     * background. Returns its id for runBackup($runId), or null when
+     * progress tracking is off.
+     */
+    public function createRun(string $trigger, ?string $note = null): ?string
+    {
+        return BackupRun::enabled() ? BackupRun::create($this, $trigger, $note)->id() : null;
+    }
 
     /**
      * @param bool $scheduled True for automatic (scheduler-triggered) runs —
      *                        only these respect the backup-scope settings
      *                        (exclusions / "only" restriction). Manual runs
      *                        without an explicit connection cover everything.
+     * @param string|null $runId A run from createRun(); without one, a new
+     *                           run is recorded when progress is on.
      */
-    public function runBackup(?string $connection = null, ?string $note = null, array $overrides = [], bool $scheduled = false): array
+    public function runBackup(?string $connection = null, ?string $note = null, array $overrides = [], bool $scheduled = false, ?string $runId = null): array
     {
-        $this->runOverrides = array_merge($this->runOverrides, $overrides);
+        // From the defaults, not the previous run's values: the service is a
+        // singleton, so in a long-lived queue worker one run's table
+        // selection or format would otherwise carry into the next run.
+        $this->runOverrides = array_merge(self::RUN_OVERRIDE_DEFAULTS, $overrides);
+        $this->run = $this->openRun($runId, $scheduled, $note);
+        if ($this->run) {
+            $this->armFatalErrorGuard();
+        }
 
-        $this->assertWithinQuota();
+        try {
+            $connections = array_values(array_filter($connection
+                ? [$connection]
+                : $this->connectionsForRun($scheduled)));
 
-        $connections = $connection
-            ? [$connection]
-            : $this->connectionsForRun($scheduled);
+            $this->run?->begin($connections, $this->run ? $this->connectionLabels() : []);
 
-        $created = [];
+            $created = [];
 
-        foreach (array_filter($connections) as $conn) {
-            $started = microtime(true);
-            $connCfg = $this->connectionConfig($conn);
-            try {
-                $created[] = $this->backupConnection($conn, $note);
-            } catch (Throwable $e) {
-                $this->appendMetadata([
-                    'id' => (string) Str::uuid(),
-                    'connection' => $conn,
-                    'database' => $connCfg['database'] ?? null,
-                    'driver' => $connCfg['driver'] ?? null,
-                    'disk' => $this->diskName(),
-                    'filename' => null,
-                    'path' => null,
-                    'size' => 0,
-                    'created_at' => now()->toIso8601String(),
-                    'duration_ms' => (int) round((microtime(true) - $started) * 1000),
-                    'note' => $note,
-                    'status' => 'failed',
-                    'error' => $e->getMessage(),
-                    'pinned' => false,
-                    'monthly_keep' => false,
-                ]);
+            foreach ($connections as $index => $conn) {
+                $started = microtime(true);
+                $connCfg = $this->connectionConfig($conn);
+                $this->runCurrent = ['index' => $index, 'connection' => $conn, 'config' => $connCfg, 'started' => $started, 'note' => $note];
+                try {
+                    if ($this->run) {
+                        $estimate = $this->estimateDump($conn, $connCfg);
+                        $this->run->connectionStarted($index, $connCfg['driver'] ?? null, $estimate['bytes'], $estimate['tables']);
+                    }
 
-                $this->notifier()->send('failure', [
-                    'connection' => $conn,
-                    'database' => $connCfg['database'] ?? null,
-                    'driver' => $connCfg['driver'] ?? null,
-                    'duration' => $this->formatDuration((int) round((microtime(true) - $started) * 1000)),
-                    'tables' => $this->describeTableSelection(),
-                    'mode' => $this->describeMode(),
-                    'note' => $note,
-                    'error' => $e->getMessage(),
-                    'time' => now()->toDateTimeString(),
-                ]);
+                    // Inside the try so a full quota is saved as a failed backup
+                    // and notified, like any other failure, instead of throwing
+                    // before anything is recorded.
+                    $this->assertBackupWithinQuota();
+                    $entry = $this->backupConnection($conn, $note);
+                    $created[] = $entry;
+                    $this->run?->connectionFinished($index, 'success', [
+                        'entry_id' => $entry['id'] ?? null,
+                        'size' => $entry['size'] ?? null,
+                        'filename' => $entry['filename'] ?? null,
+                    ]);
+                } catch (Throwable $e) {
+                    $failedId = $this->recordFailedBackup($conn, $connCfg, $started, $note, $e->getMessage());
+                    $this->run?->connectionFinished($index, 'failed', ['error' => $e->getMessage(), 'entry_id' => $failedId]);
 
-                // A single explicitly-requested connection fails hard. On a
-                // multi-connection run, one broken database (e.g. a stale
-                // tenant) must not abort the remaining backups — the failure
-                // is already recorded in metadata and notified above.
-                if ($connection) {
-                    throw $e;
+                    // A single explicitly-requested connection fails hard. On a
+                    // multi-connection run, one broken database (e.g. a stale
+                    // tenant) must not abort the remaining backups — the failure
+                    // is already recorded in metadata and notified above.
+                    if ($connection) {
+                        throw $e;
+                    }
+
+                    $lastError = $e;
+
+                    // The quota is shared by every connection, so the remaining
+                    // ones would fail the same way. Stop at one failed entry and
+                    // one notification instead of one per connection.
+                    if ($e instanceof QuotaExceededException) {
+                        break;
+                    }
+                } finally {
+                    $this->runCurrent = null;
                 }
-
-                $lastError = $e;
             }
+
+            if ($created === [] && isset($lastError)) {
+                throw $lastError;
+            }
+
+            $this->run?->runStage('retention');
+            $this->applyRetentionPolicy();
+            $this->run?->finish();
+
+            return $created;
+        } catch (Throwable $e) {
+            $this->run?->finish($e->getMessage());
+            throw $e;
+        } finally {
+            $this->run = null;
+            $this->runCurrent = null;
+            $this->fatalReserve = null;
+        }
+    }
+
+    protected function openRun(?string $runId, bool $scheduled, ?string $note): ?BackupRun
+    {
+        if (!BackupRun::enabled()) {
+            return null;
         }
 
-        if ($created === [] && isset($lastError)) {
-            throw $lastError;
+        if ($runId !== null && ($run = BackupRun::find($this, $runId))) {
+            return $run;
         }
 
-        $this->applyRetentionPolicy();
+        $trigger = $scheduled ? 'scheduled' : (app()->runningInConsole() ? 'command' : 'api');
 
-        return $created;
+        return BackupRun::create($this, $trigger, $note);
+    }
+
+    /**
+     * A fatal error (out of memory, max_execution_time) skips every catch
+     * and finally block. This shutdown handler still marks the run and the
+     * database it was on as failed, with PHP's own message as the reason.
+     * Registered once per process; it acts only while a run is active.
+     */
+    protected function armFatalErrorGuard(): void
+    {
+        $this->fatalReserve = str_repeat(' ', 256 * 1024);
+        if ($this->fatalGuardRegistered) {
+            return;
+        }
+        $this->fatalGuardRegistered = true;
+
+        register_shutdown_function(function () {
+            $this->fatalReserve = null;
+            $run = $this->run;
+            if (!$run || !$run->isActive()) {
+                return;
+            }
+
+            $error = error_get_last();
+            $fatal = $error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR, E_PARSE], true);
+            $message = $fatal
+                ? 'PHP fatal error: ' . $error['message']
+                : 'The PHP process exited before the backup finished.';
+
+            try {
+                if ($current = $this->runCurrent) {
+                    $failedId = $this->recordFailedBackup($current['connection'], $current['config'], $current['started'], $current['note'], $message);
+                    $run->connectionFinished($current['index'], 'failed', ['error' => $message, 'entry_id' => $failedId]);
+                }
+            } catch (Throwable) {
+                // Still mark the run below.
+            }
+
+            $run->finish($message);
+            $this->run = null;
+        });
+    }
+
+    /**
+     * Rough uncompressed dump size and number of tables with data, for the
+     * progress bar. Nulls when the database cannot tell.
+     *
+     * @return array{bytes:?int, tables:?int}
+     */
+    protected function estimateDump(string $connection, ?array $config): array
+    {
+        $none = ['bytes' => null, 'tables' => null];
+        if (!$config) {
+            return $none;
+        }
+
+        try {
+            switch ($config['driver'] ?? 'mysql') {
+                case 'mysql':
+                case 'mariadb':
+                    $sizes = [];
+                    foreach (DB::connection($connection)->select(
+                        "SELECT TABLE_NAME AS name, COALESCE(DATA_LENGTH, 0) AS bytes
+                           FROM information_schema.TABLES
+                          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'"
+                    ) as $row) {
+                        $sizes[(string) $row->name] = (int) $row->bytes;
+                    }
+
+                    // Same selection the dump uses: an explicit list dumps data
+                    // only for its data tables; otherwise every table but the
+                    // excluded ones.
+                    [$structureTables, $dataTables, $exclude] = $this->resolveTableSelection($connection);
+                    $names = ($structureTables || $dataTables) ? $dataTables : array_keys($sizes);
+                    $names = array_diff(array_intersect($names, array_keys($sizes)), $exclude);
+
+                    return [
+                        'bytes' => array_sum(array_map(fn ($n) => $sizes[$n], $names)),
+                        'tables' => count($names),
+                    ];
+
+                case 'pgsql':
+                case 'postgres':
+                    $row = DB::connection($connection)->selectOne('SELECT pg_database_size(current_database()) AS bytes');
+                    return ['bytes' => (int) ($row->bytes ?? 0) ?: null, 'tables' => null];
+
+                case 'sqlite':
+                    $path = (string) ($config['database'] ?? '');
+                    return ['bytes' => is_file($path) ? (int) filesize($path) : null, 'tables' => null];
+            }
+        } catch (Throwable) {
+            // No estimate: the dashboard shows bytes written without a percentage.
+        }
+
+        return $none;
+    }
+
+    /**
+     * Wrap a dump writer so the active run counts the bytes and notices the
+     * start of each table's data. A marker split across two chunks is found
+     * through the tail kept from the previous chunk, and counted only once.
+     */
+    protected function trackDumpProgress(callable $writer): callable
+    {
+        $run = $this->run;
+        if (!$run) {
+            return $writer;
+        }
+
+        [$needle, $pattern] = match ($run->currentDriver()) {
+            'pgsql', 'postgres' => ['Type: TABLE DATA;', '/-- Data for Name: ([^;]+); Type: TABLE DATA;/'],
+            'sqlite' => ['CREATE TABLE ', '/CREATE TABLE (?:IF NOT EXISTS )?["`\[]?([^"`\]\s(]+)/'],
+            default => ['-- Dumping data for table `', '/-- Dumping data for table `([^`]+)`/'],
+        };
+        $tail = '';
+
+        return function (string $data) use ($writer, $run, $needle, $pattern, &$tail) {
+            $result = $writer($data);
+
+            $haystack = $tail . $data;
+            $tables = [];
+            if (str_contains($haystack, $needle)
+                && preg_match_all($pattern, $haystack, $m, PREG_SET_ORDER | PREG_OFFSET_CAPTURE)) {
+                foreach ($m as $match) {
+                    // Ends inside the old tail ⇒ counted with the previous chunk.
+                    if ($match[0][1] + strlen($match[0][0]) > strlen($tail)) {
+                        $tables[] = $match[1][0];
+                    }
+                }
+            }
+            $tail = substr($haystack, -256);
+
+            $run->dumped(strlen($data), $tables);
+
+            return $result;
+        };
+    }
+
+    /** Save a failed backup entry and send the failure notification; returns the entry id. */
+    protected function recordFailedBackup(string $conn, ?array $connCfg, float $started, ?string $note, string $error): string
+    {
+        $id = (string) Str::uuid();
+        $this->appendMetadata([
+            'id' => $id,
+            'connection' => $conn,
+            'database' => $connCfg['database'] ?? null,
+            'driver' => $connCfg['driver'] ?? null,
+            'disk' => $this->diskName(),
+            'filename' => null,
+            'path' => null,
+            'size' => 0,
+            'created_at' => now()->toIso8601String(),
+            'duration_ms' => (int) round((microtime(true) - $started) * 1000),
+            'note' => $note,
+            'status' => 'failed',
+            'error' => $error,
+            'pinned' => false,
+            'monthly_keep' => false,
+        ]);
+
+        $this->notifier()->send('failure', [
+            'connection' => $conn,
+            'database' => $connCfg['database'] ?? null,
+            'driver' => $connCfg['driver'] ?? null,
+            'duration' => $this->formatDuration((int) round((microtime(true) - $started) * 1000)),
+            'tables' => $this->describeTableSelection(),
+            'mode' => $this->describeMode(),
+            'note' => $note,
+            'error' => $error,
+            'time' => now()->toDateTimeString(),
+        ]);
+
+        return $id;
     }
 
     /**
@@ -715,6 +1223,35 @@ class BackupStationService
         return config('backup-station.compress', true) ? 'gzip' : 'none';
     }
 
+    /**
+     * Formats a manual run may pick, as format => label. With encryption on
+     * the only choice is the encrypted ZIP, so a run cannot skip it.
+     *
+     * @return array<string,string>
+     */
+    public function archiveFormatOptions(): array
+    {
+        if ($this->isEncryptionEnabled()) {
+            return ['encrypted-zip' => 'Encrypted ZIP (.sql.zip)'];
+        }
+
+        return [
+            'zip' => 'ZIP (.sql.zip)',
+            'gzip' => 'Gzip (.sql.gz)',
+            'none' => 'Plain SQL (.sql)',
+        ];
+    }
+
+    /** The configured format, or the one picked for this run when allowed. */
+    protected function runArchiveFormat(): string
+    {
+        $picked = $this->runOverrides['archive'] ?? null;
+
+        return is_string($picked) && isset($this->archiveFormatOptions()[$picked])
+            ? $picked
+            : $this->archiveFormat();
+    }
+
     protected function extensionFor(string $format): string
     {
         return match ($format) {
@@ -722,6 +1259,31 @@ class BackupStationService
             'zip', 'encrypted-zip' => '.sql.zip',
             default => '.sql',
         };
+    }
+
+    /**
+     * The note saved on a successful backup. When none was given and the
+     * backup kept some tables' structure without their data, say so —
+     * e.g. "without activity log data" — so nobody restores it expecting
+     * those rows. More than three such tables are counted, not named.
+     */
+    protected function noteForBackup(?string $note, string $connection): ?string
+    {
+        if ($note !== null && trim($note) !== '') {
+            return $note;
+        }
+
+        [$structureTables, $dataTables] = $this->resolveTableSelection($connection);
+        $structureOnly = array_values(array_diff($structureTables, $dataTables));
+        if (!$structureOnly) {
+            return $note;
+        }
+
+        if (count($structureOnly) > 3) {
+            return 'without data for ' . count($structureOnly) . ' tables';
+        }
+
+        return 'without ' . implode(', ', array_map(fn ($t) => str_replace('_', ' ', $t), $structureOnly)) . ' data';
     }
 
     protected function backupConnection(string $connection, ?string $note = null): array
@@ -737,7 +1299,7 @@ class BackupStationService
         $driver = $config['driver'] ?? 'mysql';
         $database = $config['database'] ?? 'database';
 
-        $format = $this->archiveFormat();
+        $format = $this->runArchiveFormat();
         // Stream gzip during the dump only when the final format is gzip;
         // for zip/encrypted-zip we want a raw .sql we can wrap afterwards.
         $compressDuringDump = ($format === 'gzip');
@@ -751,6 +1313,7 @@ class BackupStationService
         $uploadTemp = $rawTemp;
 
         try {
+            $this->run?->stage('dumping');
             match ($driver) {
                 'mysql', 'mariadb' => $this->dumpMysql($config, $rawTemp, $compressDuringDump),
                 'pgsql', 'postgres' => $this->dumpPostgres($config, $rawTemp, $compressDuringDump),
@@ -765,6 +1328,7 @@ class BackupStationService
             if ($format === 'zip' || $format === 'encrypted-zip') {
                 $zippedTemp = $this->newTempPath($filename);
                 $innerName = preg_replace('/\.zip$/i', '', $filename); // ".sql"
+                $this->run?->stage($format === 'encrypted-zip' ? 'encrypting' : 'compressing', (int) filesize($rawTemp));
                 if ($format === 'encrypted-zip') {
                     $this->encryptZip($rawTemp, $zippedTemp, $innerName, (string) config('backup-station.encryption.password'));
                 } else {
@@ -773,6 +1337,7 @@ class BackupStationService
                 $uploadTemp = $zippedTemp;
             }
 
+            $this->run?->stage('saving', (int) filesize($uploadTemp));
             $finalPath = $this->moveIntoStorage($uploadTemp, $filename);
             $size = $this->size($filename);
         } finally {
@@ -791,7 +1356,7 @@ class BackupStationService
             'size' => $size,
             'created_at' => now()->toIso8601String(),
             'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
-            'note' => $note,
+            'note' => $this->noteForBackup($note, $connection),
             'status' => 'success',
             'error' => null,
             'pinned' => false,
@@ -1363,6 +1928,8 @@ class BackupStationService
             $writer = fn (string $d) => fwrite($h, $d);
             $closer = fn () => fclose($h);
         }
+
+        $writer = $this->trackDumpProgress($writer);
 
         try {
             $body($writer);
@@ -2085,7 +2652,15 @@ class BackupStationService
         try {
             $process = new Process([$bin, '-q', '-j', '-9', $zipPath, $stagedFile], $stageDir);
             $process->setTimeout((int) config('backup-station.timeout', 1800));
-            $process->run();
+            // Poll instead of run() so a long zip keeps the run's progress
+            // fresh and the dashboard does not take it for a dead process.
+            $process->start();
+            while ($process->isRunning()) {
+                usleep(500000);
+                $process->checkTimeout();
+                $this->run?->heartbeat();
+            }
+            $process->wait();
 
             if (!$process->isSuccessful()) {
                 @unlink($zipPath);
@@ -2117,6 +2692,8 @@ class BackupStationService
         if (defined('ZipArchive::CM_DEFLATE')) {
             @$zip->setCompressionName($innerName, \ZipArchive::CM_DEFLATE);
         }
+
+        $this->trackZipProgress($zip);
 
         if (!$zip->close()) {
             @unlink($zipPath);
@@ -2176,9 +2753,23 @@ class BackupStationService
             );
         }
 
+        $this->trackZipProgress($zip);
+
         if (!$zip->close()) {
             @unlink($zipPath);
             throw new RuntimeException('Failed to write encrypted archive.');
+        }
+    }
+
+    /**
+     * ZipArchive does all the compression inside close(). Where libzip
+     * reports progress (PHP 8.0+, libzip 1.3+), pass it to the active run.
+     */
+    protected function trackZipProgress(\ZipArchive $zip): void
+    {
+        $run = $this->run;
+        if ($run && method_exists($zip, 'registerProgressCallback')) {
+            $zip->registerProgressCallback(0.01, fn (float $rate) => $run->stageFraction($rate));
         }
     }
 

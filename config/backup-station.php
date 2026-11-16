@@ -98,6 +98,33 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Progress
+    |--------------------------------------------------------------------------
+    |
+    | Every backup run (dashboard, scheduler, Artisan) writes its progress to
+    | runs/<id>.json on the backup disk, and the dashboard shows it live:
+    | the database being backed up, the table being dumped, bytes written,
+    | and the reason when it fails.
+    |
+    | interval:              Seconds between progress writes during a dump.
+    | stale_after:           Seconds without an update before a running
+    |                        backup is shown as "stopped responding" (the
+    |                        process was probably killed). Keep it above
+    |                        your longest compress or upload step.
+    | show_finished_minutes: How long a successful run stays on the dashboard.
+    | show_failed_hours:     How long a failed run stays, unless dismissed.
+    |
+    */
+    'progress' => [
+        'enabled' => (bool) env('BACKUP_STATION_PROGRESS', true),
+        'interval' => 2,
+        'stale_after' => 600,
+        'show_finished_minutes' => 10,
+        'show_failed_hours' => 24,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Database Connections to Backup
     |--------------------------------------------------------------------------
     |
@@ -523,6 +550,10 @@ return [
     | max_upload_kb:    Per-file cap in KB (default 100 MB).
     | total_quota_kb:   Refuse new uploads/backups when the total disk usage
     |                   would exceed this (in KB, default 5 GB). 0 = no cap.
+    |                   Backups the retention policy deletes after the run
+    |                   count as free. A refused backup is saved as a failed
+    |                   entry and sends the failure notification. Size it to
+    |                   hold everything retention keeps (daily + monthly).
     |
     */
     'import' => [

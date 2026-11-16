@@ -18,6 +18,47 @@
         @if(session('flash_error'))
             <div class="flash flash-error">{{ session('flash_error') }}</div>
         @endif
+        @if(!empty($quota['exceeded']))
+            <div class="flash flash-error" role="alert">
+                <div>⚠ Storage quota exceeded: new backups are refused, scheduled ones included.</div>
+                <div style="font-weight:400;margin-top:4px">
+                    Stored backups use {{ $service->formatBytes($quota['used']) }} of the {{ $service->formatBytes($quota['cap']) }} cap{{ $quota['reclaimable'] > 0
+                        ? ' (' . $service->formatBytes($quota['after_retention']) . ' after the retention policy frees ' . $service->formatBytes($quota['reclaimable']) . ')'
+                        : '' }}.
+                    Raise <code>BACKUP_STATION_TOTAL_QUOTA_KB</code> or delete old backups.
+                </div>
+                @if(!empty($suggestedQuota))
+                    <div style="font-weight:400;margin-top:4px">
+                        Suggested: <code>BACKUP_STATION_TOTAL_QUOTA_KB={{ $suggestedQuota['kb'] }}</code> ({{ $service->formatBytes($suggestedQuota['bytes']) }}).
+                        Room for {{ $suggestedQuota['count'] }} backups of about {{ $service->formatBytes($suggestedQuota['per_backup']) }}
+                        ({{ $suggestedQuota['regular'] }} recent, {{ $suggestedQuota['monthly'] }} monthly, {{ $suggestedQuota['in_flight'] }} being written{{ $suggestedQuota['pinned'] ? ', plus ' . $suggestedQuota['pinned'] . ' protected' : '' }}),
+                        plus 20% for growth.
+                    </div>
+                    @if(!empty($serverDisk['available']) && $suggestedQuota['bytes'] > $serverDisk['free'] + $quota['used'])
+                        <div style="font-weight:400;margin-top:4px">
+                            This server cannot hold that: {{ $service->formatBytes($serverDisk['free']) }} free plus {{ $service->formatBytes($quota['used']) }} already used by backups.
+                            Keep fewer backups (<code>keep_for_days</code>, <code>keep_months</code>) or store them on another disk.
+                        </div>
+                    @endif
+                @endif
+                <div style="font-weight:400;margin-top:4px">
+                    Last successful backup:
+                    @if($lastSuccessAt)
+                        {{ \Carbon\Carbon::parse($lastSuccessAt)->format('Y-m-d H:i') }} ({{ \Carbon\Carbon::parse($lastSuccessAt)->locale('en')->diffForHumans() }})
+                    @else
+                        none
+                    @endif
+                </div>
+            </div>
+        @endif
+
+        @if(\MahmoudMhamed\BackupStation\Progress\BackupRun::enabled())
+            <div id="bs-runs" class="bs-runs" aria-live="polite"
+                 data-url="{{ route('backup-station.runs') }}"
+                 data-dismiss-url="{{ route('backup-station.runs.dismiss') }}"
+                 data-csrf="{{ csrf_token() }}"></div>
+            <script type="application/json" id="bs-runs-data">@json(['runs' => $runs ?? [], 'now' => now()->utc()->toIso8601String()])</script>
+        @endif
 
         @php
             $bsRate = $stats['success_rate'] ?? null;
@@ -239,8 +280,9 @@
                         $bsDownloadable = ($b['status'] ?? null) === 'success'
                             && ($b['type'] ?? null) !== 'restore'
                             && ($b['_exists'] ?? true);
+                        $bsIsNew = isset($newBackupIds[$id]);
                     @endphp
-                    <tr>
+                    <tr @class(['bs-row-new' => $bsIsNew])>
                         <td class="bs-sel-col">
                             @if($bsDownloadable || $bsCanDelete)
                                 <input type="checkbox" class="bs-row-cb" value="{{ $id }}" data-downloadable="{{ $bsDownloadable ? '1' : '0' }}" data-pinned="{{ empty($b['pinned']) ? '0' : '1' }}"
@@ -257,6 +299,7 @@
                         <td>
                             @php $isRestore = ($b['type'] ?? null) === 'restore'; @endphp
                             <div class="filename">
+                                @if($bsIsNew)<span class="badge badge-new" style="margin-right:6px" title="Created by a backup run that just finished">New</span>@endif
                                 @if($isRestore)<span class="badge badge-info" style="margin-right:6px">↺ Restore</span>@endif
                                 {{ $b['filename'] ?? '—' }}
                             </div>
@@ -479,9 +522,26 @@
             </div>
         </div>
 
-        <div style="margin-top:12px">
-            <label class="muted" style="font-size:12px">Note (optional)</label>
-            <input type="text" name="note" placeholder="e.g. Pre-deploy" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:13px">
+        @php
+            $bsFormats = $service->archiveFormatOptions();
+            $bsDefaultFormat = $service->archiveFormat();
+        @endphp
+        <div style="margin-top:12px;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,2fr);gap:10px">
+            <div>
+                <label class="muted" style="font-size:12px" for="run-archive">Format</label>
+                <select name="archive" id="run-archive" @disabled(count($bsFormats) < 2) style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:13px">
+                    @foreach($bsFormats as $bsFormat => $bsFormatLabel)
+                        <option value="{{ $bsFormat }}" @selected($bsFormat === $bsDefaultFormat)>{{ $bsFormatLabel }}{{ $bsFormat === $bsDefaultFormat ? ' · default' : '' }}</option>
+                    @endforeach
+                </select>
+                @if(count($bsFormats) < 2)
+                    <div class="muted" style="font-size:11px;margin-top:4px">Encryption is on, so backups are always a password-protected ZIP.</div>
+                @endif
+            </div>
+            <div>
+                <label class="muted" style="font-size:12px">Note (optional)</label>
+                <input type="text" name="note" placeholder="e.g. Pre-deploy" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-size:13px">
+            </div>
         </div>
 
         <div class="modal-actions">
@@ -1288,6 +1348,241 @@
     document.querySelectorAll('form[data-loading]').forEach(form => {
         form.addEventListener('submit', () => showLoading(form.dataset.loading));
     });
+
+    // Backup run progress: rendered from JSON, polled every 2 s while a run
+    // is active and every 20 s otherwise (to catch scheduled runs).
+    (function () {
+        const box = document.getElementById('bs-runs');
+        if (!box) return;
+
+        const ACTIVE = ['queued', 'running'];
+        const TITLES = {
+            queued: '⏳ Waiting to start', running: '⏳ Backup running', success: '✓ Backup finished',
+            partial: '⚠ Backup finished with errors', failed: '✗ Backup failed', stale: '✗ Backup stopped responding',
+        };
+        const TRIGGERS = { dashboard: 'From the dashboard', scheduled: 'Scheduled run', command: 'Artisan command', api: 'From code' };
+        const openDetails = new Set();
+        let state = { runs: [], now: null };
+        let clockOffset = 0;
+        let timer = null;
+        let reloading = false;
+
+        try { state = JSON.parse(document.getElementById('bs-runs-data').textContent); } catch (e) {}
+
+        const isActive = r => ACTIVE.includes(r.status);
+        const anyActive = () => state.runs.some(isActive);
+        const setClock = iso => { const t = Date.parse(iso || ''); if (!isNaN(t)) clockOffset = t - Date.now(); };
+        const since = iso => { const t = Date.parse(iso || ''); return isNaN(t) ? null : Math.max(0, (Date.now() + clockOffset - t) / 1000); };
+
+        function fmtBytes(n) {
+            n = Number(n) || 0;
+            const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+            let i = 0;
+            while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+            return (i === 0 ? n : n.toFixed(n < 10 ? 2 : 1)) + ' ' + u[i];
+        }
+        function fmtDuration(s) {
+            s = Math.round(s);
+            if (s < 60) return s + 's';
+            const m = Math.floor(s / 60);
+            if (m < 60) return m + 'm ' + (s % 60) + 's';
+            return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+        }
+        function fmtTime(iso) {
+            const d = new Date(iso);
+            return isNaN(d) ? '' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+        function el(tag, cls, text) {
+            const e = document.createElement(tag);
+            if (cls) e.className = cls;
+            if (text != null) e.textContent = text;
+            return e;
+        }
+        function bar(fraction) {
+            const b = el('div', 'bs-bar' + (fraction == null ? ' is-indeterminate' : ''));
+            const fill = el('span');
+            if (fraction != null) fill.style.width = (Math.max(0, Math.min(1, fraction)) * 100).toFixed(1) + '%';
+            // Same phase on every re-render, so polling does not restart the animation.
+            else fill.style.animationDelay = -(Date.now() % 1200) + 'ms';
+            b.appendChild(fill);
+            return b;
+        }
+        function errorBox(label, message) {
+            const box = el('div', 'bs-run-error');
+            if (label) { box.appendChild(el('b', null, label + ': ')); }
+            box.appendChild(document.createTextNode(message));
+            return box;
+        }
+
+        // Share of the current database done: the dump is measured against
+        // an estimate (so "~"), compression against libzip's own report.
+        function stageFraction(c) {
+            if (c.stage === 'dumping') return c.estimate ? Math.min(0.99, (c.bytes || 0) / c.estimate) : null;
+            if (c.stage === 'compressing' || c.stage === 'encrypting') return c.stage_fraction != null ? c.stage_fraction : null;
+            return null;
+        }
+        function connectionShare(c) {
+            if (!c) return 0;
+            const f = stageFraction(c);
+            if (c.stage === 'dumping') return (f || 0) * 0.85;
+            if (c.stage === 'compressing' || c.stage === 'encrypting') return 0.85 + (f || 0) * 0.1;
+            if (c.stage === 'saving') return 0.97;
+            return 0;
+        }
+        function stageText(c) {
+            const f = stageFraction(c);
+            switch (c.stage) {
+                case 'preparing': return 'Preparing…';
+                case 'dumping': {
+                    let t = 'Dumping';
+                    if (c.table) t += ' `' + c.table + '`';
+                    if (c.tables_total) t += ' (table ' + Math.max(1, Math.min(c.tables_done || 0, c.tables_total)) + ' of ' + c.tables_total + ')';
+                    t += ' · ' + fmtBytes(c.bytes) + (c.estimate ? ' of ~' + fmtBytes(c.estimate) : ' written');
+                    return t + (f != null ? ' · ~' + Math.floor(f * 100) + '%' : '');
+                }
+                case 'compressing':
+                case 'encrypting':
+                    return (c.stage === 'compressing' ? 'Compressing ' : 'Encrypting ') + fmtBytes(c.stage_total)
+                        + (f != null ? ' · ' + Math.floor(f * 100) + '%' : '…');
+                case 'saving': return 'Saving ' + fmtBytes(c.stage_total) + ' to the backup disk…';
+                default: return '';
+            }
+        }
+
+        function renderRun(r) {
+            const card = el('div', 'bs-run is-' + r.status);
+            const total = r.total || 0;
+            const n = r.counts || {};
+            const active = isActive(r);
+
+            const head = el('div', 'bs-run-head');
+            head.appendChild(el('span', 'bs-run-title', TITLES[r.status] || r.status));
+            const meta = [TRIGGERS[r.trigger] || r.trigger];
+            if (r.started_at) meta.push('started ' + fmtTime(r.started_at));
+            if (active) {
+                const s = since(r.started_at || r.created_at);
+                if (s != null) meta.push((r.status === 'queued' ? 'waiting ' : '') + fmtDuration(s));
+            } else if (r.started_at && r.finished_at) {
+                meta.push('took ' + fmtDuration((Date.parse(r.finished_at) - Date.parse(r.started_at)) / 1000));
+            }
+            if (r.note) meta.push('“' + r.note + '”');
+            head.appendChild(el('span', 'bs-run-meta', meta.join(' · ')));
+            if (!active) {
+                const x = el('button', 'bs-run-dismiss', '×');
+                x.type = 'button';
+                x.title = 'Hide';
+                x.setAttribute('aria-label', 'Hide this run');
+                x.addEventListener('click', () => dismiss(r.id));
+                head.appendChild(x);
+            }
+            card.appendChild(head);
+
+            if (total > 1) {
+                const finished = (n.success || 0) + (n.failed || 0) + (n.skipped || 0);
+                const line = el('div', 'bs-run-line');
+                line.appendChild(el('span', null, active && r.current_connection
+                    ? 'Database ' + Math.min(total, finished + 1) + ' of ' + total
+                    : total + ' databases'));
+                const tally = ['✓ ' + (n.success || 0)];
+                if (n.failed) tally.push('✗ ' + n.failed);
+                if (n.skipped) tally.push(n.skipped + ' skipped');
+                line.appendChild(el('span', 'bs-run-sub', tally.join(' · ')));
+                card.appendChild(line);
+                if (active) card.appendChild(bar((finished + connectionShare(r.current_connection)) / total));
+            }
+
+            const c = r.current_connection;
+            if (c && (active || r.status === 'stale')) {
+                const line = el('div', 'bs-run-line');
+                line.appendChild(el('strong', null, c.label || c.name));
+                line.appendChild(el('span', 'bs-run-sub', stageText(c)));
+                card.appendChild(line);
+                if (active) card.appendChild(bar(stageFraction(c)));
+            } else if (r.status === 'queued') {
+                card.appendChild(el('div', 'bs-run-line bs-run-sub', 'Waiting for the backup to start…'));
+                card.appendChild(bar(null));
+            } else if (active && r.stage === 'retention') {
+                card.appendChild(el('div', 'bs-run-line bs-run-sub', 'Applying the retention policy…'));
+                card.appendChild(bar(null));
+            }
+
+            if (r.error) card.appendChild(errorBox(r.status === 'stale' ? 'Reason' : 'Error', r.error));
+            (r.failed_connections || []).forEach(f => card.appendChild(errorBox(total > 1 ? (f.label || f.name) : 'Error', f.error || 'Failed')));
+            if ((n.failed || 0) > (r.failed_connections || []).length) {
+                card.appendChild(el('div', 'bs-run-line bs-run-sub', 'and ' + (n.failed - r.failed_connections.length) + ' more failures in the list below'));
+            }
+
+            const done = r.done_connections || [];
+            if (!active && done.length === 1 && total === 1) {
+                const line = el('div', 'bs-run-line');
+                line.appendChild(el('span', null, done[0].filename || done[0].label || done[0].name));
+                line.appendChild(el('span', 'bs-run-sub', fmtBytes(done[0].size)));
+                card.appendChild(line);
+            } else if (done.length && total > 1) {
+                const d = el('details');
+                d.open = openDetails.has(r.id);
+                d.addEventListener('toggle', () => { d.open ? openDetails.add(r.id) : openDetails.delete(r.id); });
+                d.appendChild(el('summary', null, 'Backed up (' + (n.success || done.length) + ')'));
+                const ul = el('ul', 'bs-run-list');
+                done.forEach(x => ul.appendChild(el('li', null, '✓ ' + (x.label || x.name) + ' · ' + fmtBytes(x.size))));
+                d.appendChild(ul);
+                card.appendChild(d);
+            }
+
+            return card;
+        }
+
+        function render() {
+            box.replaceChildren(...state.runs.map(renderRun));
+            box.style.display = state.runs.length ? '' : 'none';
+        }
+
+        // A run just ended: reload once so the list and the cards include
+        // it — but not while a dialog is open.
+        function reloadWhenIdle() {
+            reloading = true;
+            if (document.querySelector('.modal-backdrop.open, .bs-loading.open')) {
+                setTimeout(reloadWhenIdle, 2000);
+                return;
+            }
+            location.reload();
+        }
+
+        function schedule() {
+            clearTimeout(timer);
+            if (!reloading) timer = setTimeout(poll, anyActive() ? 2000 : 20000);
+        }
+
+        function poll() {
+            const wasActive = anyActive();
+            fetch(box.dataset.url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+                .then(res => res.ok ? res.json() : Promise.reject(res))
+                .then(data => {
+                    state = { runs: data.runs || [], now: data.now };
+                    setClock(data.now);
+                    render();
+                    if (wasActive && !anyActive()) setTimeout(reloadWhenIdle, 1500);
+                })
+                .catch(() => {})
+                .finally(schedule);
+        }
+
+        function dismiss(id) {
+            state.runs = state.runs.filter(r => r.id !== id);
+            render();
+            const body = new FormData();
+            body.append('id', id);
+            body.append('_token', box.dataset.csrf);
+            fetch(box.dataset.dismissUrl, {
+                method: 'POST', body, credentials: 'same-origin',
+                headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            }).catch(() => {});
+        }
+
+        setClock(state.now);
+        render();
+        schedule();
+    })();
 
     function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
